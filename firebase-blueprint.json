@@ -1,0 +1,147 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile registered via Google or email authentication",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name"
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile picture URL"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of account creation"
+        }
+      },
+      "required": ["id", "email"]
+    },
+    "Contract": {
+      "title": "Contract",
+      "description": "Furnished residential lease contract with clauses, guarantee, and inventory",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique contract ID"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the user who owns this contract"
+        },
+        "title": {
+          "type": "string",
+          "description": "Contract title or identification"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["rascunho", "gerado", "revisado", "assinado"],
+          "description": "Contract status lifecycle"
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether public mobile view via QR Code is enabled"
+        },
+        "locador": {
+          "type": "object",
+          "description": "Landlord details"
+        },
+        "locatario": {
+          "type": "object",
+          "description": "Tenant details"
+        },
+        "imovel": {
+          "type": "object",
+          "description": "Property information and furniture description"
+        },
+        "prazo": {
+          "type": "object",
+          "description": "Lease duration and dates"
+        },
+        "valores": {
+          "type": "object",
+          "description": "Rent amounts, PIX, bank details, and utilities"
+        },
+        "vistoria": {
+          "type": "object",
+          "description": "Survey link and SHA-256 integrity hash"
+        },
+        "garantia": {
+          "type": "object",
+          "description": "Guarantee type (Caução, Fiador, Seguro Fiança) and specific fields"
+        },
+        "penalidades": {
+          "type": "object",
+          "description": "Penalties, late fees, and breach terms"
+        },
+        "foro": {
+          "type": "object",
+          "description": "Legal jurisdiction forum and dates"
+        },
+        "inventario": {
+          "type": "array",
+          "description": "Annex I inventory items list"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation ISO date"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update ISO date"
+        }
+      },
+      "required": ["id", "ownerId", "title", "status", "locador", "locatario", "imovel", "valores", "garantia"]
+    },
+    "Imovel": {
+      "title": "Imovel",
+      "description": "Registered property record with details, composition, and photos",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "titulo": { "type": "string" },
+        "tipo": { "type": "string" },
+        "endereco": { "type": "string" },
+        "compostos": { "type": "string" },
+        "valorAluguelSugerido": { "type": "number" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "titulo", "endereco", "compostos"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/User"
+      },
+      "description": "User profile collection"
+    },
+    "/imoveis/{imovelId}": {
+      "schema": {
+        "$ref": "#/entities/Imovel"
+      },
+      "description": "Registered properties collection"
+    },
+    "/contracts/{contractId}": {
+      "schema": {
+        "$ref": "#/entities/Contract"
+      },
+      "description": "Collection of residential lease agreements with ABAC security"
+    }
+  }
+}

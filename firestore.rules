@@ -1,0 +1,114 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'iluminatto@gmail.com' ||
+        (request.auth.token.keys().hasAll(['admin']) && request.auth.token.admin == true)
+      );
+    }
+
+    function isTenantForContract(data) {
+      return isSignedIn() && (
+        (data.keys().hasAll(['tenantId']) && data.tenantId == request.auth.uid) ||
+        (data.keys().hasAll(['locatario']) && data.locatario.keys().hasAll(['email']) && data.locatario.email == request.auth.token.email)
+      );
+    }
+
+    // Users Collection (LGPD - Restrito ao próprio titular ou Administrador)
+    match /users/{userId} {
+      // Inquilino só pode ver seu próprio perfil. Proibido listar outros inquilinos.
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) || isAdmin();
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Properties Collection (Cadastro de Imóveis)
+    match /imoveis/{imovelId} {
+      allow get, list: if isSignedIn();
+      // Apenas administradores podem cadastrar, alterar ou excluir imóveis
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Contracts Collection (LGPD & RBAC: Inquilino não exclui e não altera cláusulas/valores)
+    match /contracts/{contractId} {
+      // Leitura: apenas o Administrador ou o inquilino vinculado a este contrato específico
+      allow get: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid || isTenantForContract(existing()));
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid || isTenantForContract(resource.data));
+      
+      // Criação: apenas Administrador / Locador
+      allow create: if isSignedIn() && (isAdmin() || (incoming().userId == request.auth.uid && isValidId(contractId)));
+      
+      // Atualização: 
+      // - Administrador pode atualizar tudo
+      // - Inquilino pode alterar EXCLUSIVAMENTE seus próprios dados cadastrais (locatario, updatedAt)
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (existing().userId == request.auth.uid) ||
+        (isTenantForContract(existing()) && incoming().diff(existing()).affectedKeys().hasOnly(['locatario', 'updatedAt']))
+      );
+
+      // Exclusão: NENHUM INQUILINO PODE EXCLUIR. Apenas Administrador.
+      allow delete: if isAdmin();
+    }
+
+    // Public Mobile QR Code Contract Shares
+    match /public_contracts/{shareId} {
+      // Public mobile view read
+      allow get: if isValidId(shareId);
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && (isAdmin() || incoming().userId == request.auth.uid) && isValidId(shareId);
+      allow update: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Short-Term Rental Listings (Temporada & Diárias Airbnb)
+    match /temporada_imoveis/{imovelId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Short-Term Rental Bookings & Vouchers (Reservas de Temporada)
+    match /temporada_reservas/{reservaId} {
+      allow get: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid || (existing().keys().hasAll(['hospedeEmail']) && existing().hospedeEmail == request.auth.token.email));
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid || (resource.data.keys().hasAll(['hospedeEmail']) && resource.data.hospedeEmail == request.auth.token.email));
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // Health check / connection test document
+    match /test/{docId} {
+      allow read, write: if isSignedIn() || isAdmin();
+    }
+
+  }
+}

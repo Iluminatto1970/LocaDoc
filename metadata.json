@@ -1,0 +1,6 @@
+{
+  "name": "LocaDoc - Sistema de Gestão de Contratos de Locação Mobiliada",
+  "description": "Sistema de gestão e geração de contratos de locação residencial de imóveis mobiliados e laudos de vistoria/inventário com validação criptográfica.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
