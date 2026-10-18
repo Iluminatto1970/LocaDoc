@@ -41,13 +41,34 @@ service cloud.firestore {
       );
     }
 
+    // Nenhuma senha pode ser persistida no Firestore (a autenticação é do backend)
+    function hasNoPasswordKey() {
+      return !incoming().keys().hasAny(['password', 'senha', 'pass']);
+    }
+
+    function isSelfEscalatingRole() {
+      return incoming().keys().hasAll(['role']) && incoming().role in ['admin', 'superadmin'];
+    }
+
     // Users Collection (LGPD - Restrito ao próprio titular ou Administrador)
     match /users/{userId} {
       // Inquilino só pode ver seu próprio perfil. Proibido listar outros inquilinos.
       allow get: if isOwner(userId) || isAdmin();
       allow list: if isAdmin();
-      allow create: if isOwner(userId) || isAdmin();
-      allow update: if isOwner(userId) || isAdmin();
+
+      // Auto-cadastro é permitido, mas nunca com papel administrativo
+      allow create: if (isOwner(userId) || isAdmin()) && hasNoPasswordKey() && (isAdmin() || !isSelfEscalatingRole());
+
+      // Titular só edita seus próprios dados cadastrais; role/status/papel só o Administrador
+      allow update: if isAdmin() || (
+        isOwner(userId) &&
+        hasNoPasswordKey() &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'name', 'photoURL', 'telefone', 'cpf',
+          'unidade', 'bloco', 'condominioNome', 'creci', 'updatedAt'
+        ])
+      );
+
       allow delete: if isAdmin();
     }
 
@@ -100,14 +121,19 @@ service cloud.firestore {
     match /temporada_reservas/{reservaId} {
       allow get: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid || (existing().keys().hasAll(['hospedeEmail']) && existing().hospedeEmail == request.auth.token.email));
       allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid || (resource.data.keys().hasAll(['hospedeEmail']) && resource.data.hospedeEmail == request.auth.token.email));
-      allow create: if isSignedIn();
+      // Reserva só pode ser criada pelo próprio hóspede/locatário ou por Administrador
+      allow create: if isSignedIn() && (
+        isAdmin() ||
+        (incoming().keys().hasAll(['userId']) && incoming().userId == request.auth.uid) ||
+        (incoming().keys().hasAll(['hospedeEmail']) && incoming().hospedeEmail == request.auth.token.email)
+      );
       allow update: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid);
       allow delete: if isAdmin();
     }
 
     // Health check / connection test document
     match /test/{docId} {
-      allow read, write: if isSignedIn() || isAdmin();
+      allow read, write: if isSignedIn();
     }
 
   }

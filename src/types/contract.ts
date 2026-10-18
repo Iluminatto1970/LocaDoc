@@ -260,6 +260,8 @@ export interface UserAccount {
   condominioNome?: string;
   createdAt?: string;
   createdBy?: string;
+  updatedAt?: string;
+  updatedBy?: string;
 }
 
 export type DocumentTargetRole = 'locador' | 'locatario' | 'imovel' | 'fiador' | 'laudo' | 'outro';

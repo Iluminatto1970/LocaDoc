@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { 
   Cpu, Key, Globe, Terminal, CheckCircle2, AlertCircle, 
   RefreshCw, Copy, Check, ExternalLink, ShieldCheck, Code, 
@@ -8,6 +9,7 @@ import {
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { doc, getDocFromServer, setDoc } from 'firebase/firestore';
+import { AdminTeamManager } from './AdminTeamManager';
 
 export type LlmProviderId = 'gemini' | 'openai' | 'anthropic' | 'groq' | 'custom';
 
@@ -150,7 +152,7 @@ export const ApiGeminiManager: React.FC = () => {
   const fetchLlmConfig = async () => {
     setIsLoadingStatus(true);
     try {
-      const res = await fetch('/api/llm/config');
+      const res = await apiFetch('/api/llm/config');
       if (res.ok) {
         const data: MultiLlmStatusResponse = await res.json();
         setLlmStatus(data);
@@ -186,7 +188,7 @@ export const ApiGeminiManager: React.FC = () => {
 
   const fetchDatabaseStatus = async () => {
     try {
-      const res = await fetch('/api/database/status');
+      const res = await apiFetch('/api/database/status');
       if (res.ok) {
         const data = await res.json();
         setDbStatus(data);
@@ -250,7 +252,7 @@ export const ApiGeminiManager: React.FC = () => {
     }
 
     try {
-      const res = await fetch('/api/llm/config', {
+      const res = await apiFetch('/api/llm/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -305,7 +307,7 @@ export const ApiGeminiManager: React.FC = () => {
     setIsSaving(true);
     setFeedback(null);
     try {
-      const res = await fetch('/api/llm/config', {
+      const res = await apiFetch('/api/llm/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider, reset: true }),
@@ -350,7 +352,7 @@ export const ApiGeminiManager: React.FC = () => {
     setActiveProvider(prov);
     try {
       localStorage.setItem('locadoc_active_llm_provider', prov);
-      await fetch('/api/llm/config', {
+      await apiFetch('/api/llm/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ activeProvider: prov }),
@@ -396,7 +398,7 @@ export const ApiGeminiManager: React.FC = () => {
     }
 
     try {
-      const res = await fetch('/api/llm/test-connection', {
+      const res = await apiFetch('/api/llm/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -722,6 +724,9 @@ export const ApiGeminiManager: React.FC = () => {
       {/* TAB CONTENT 0: OVERVIEW & CONNECTION HUB */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
+          {/* Gestão de Administradores (CRUD) — exclusiva do Super Admin */}
+          <AdminTeamManager />
+
           <div className="bg-white p-6 sm:p-7 rounded-2xl border border-slate-200 shadow-xs space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
               <div>

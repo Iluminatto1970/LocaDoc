@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { apiFetch } from '../lib/api';
 import { UploadedDocFile, ContractData, DocumentTargetRole } from '../types/contract';
 import { calculateSHA256 } from '../utils/defaults';
 import { useAuth } from '../context/AuthContext';
@@ -273,7 +274,7 @@ Use o hash do laudo/vistoria abaixo para a Cláusula 5.2:
 ${files.find((f) => f.targetRole === 'laudo')?.sha256 || files[0]?.sha256 || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}
 `;
 
-      const response = await fetch('/api/extract-documents', {
+      const response = await apiFetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

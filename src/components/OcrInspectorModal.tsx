@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { UploadedDocFile, DocumentTargetRole } from '../types/contract';
 import { useAuth } from '../context/AuthContext';
 import { 
@@ -61,7 +62,7 @@ export const OcrInspectorModal: React.FC<OcrInspectorModalProps> = ({
       setIsLoading(true);
       setError(null);
       try {
-        const response = await fetch('/api/ocr-extract-single', {
+        const response = await apiFetch('/api/ocr-extract-single', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

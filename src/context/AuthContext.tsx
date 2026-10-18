@@ -3,6 +3,7 @@ import { UserAccount, UserRole } from '../types/contract';
 import { auth, googleProvider, db } from '../lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, setDoc, getDoc, getDocs, collection, deleteDoc } from 'firebase/firestore';
+import { AUTH_TOKEN_KEY, AUTH_USER_KEY, SESSION_EXPIRED_EVENT, getAuthToken, apiFetch } from '../lib/api';
 
 interface LoginResult {
   success: boolean;
@@ -14,11 +15,25 @@ interface AuthContextType {
   firebaseUser: FirebaseUser | null;
   isAuthenticated: boolean;
   usersList: UserAccount[];
-  login: (emailOrUser: string, pass: string) => LoginResult;
+  login: (emailOrUser: string, pass: string) => Promise<LoginResult>;
   register: (name: string, email: string, pass: string, creci?: string, telefone?: string, unidade?: string, bloco?: string, cpf?: string) => Promise<LoginResult>;
   addUser: (name: string, email: string, pass: string, role: UserRole, creci?: string, telefone?: string, unidade?: string, bloco?: string, cpf?: string) => Promise<LoginResult>;
   approveUser: (userId: string, newStatus: 'aprovado' | 'bloqueado' | 'pendente') => Promise<void>;
-  deleteUser: (userId: string) => Promise<void>;
+  updateUser: (
+    userId: string,
+    changes: {
+      name?: string;
+      email?: string;
+      password?: string;
+      role?: UserRole;
+      creci?: string;
+      telefone?: string;
+      unidade?: string;
+      bloco?: string;
+      cpf?: string;
+    }
+  ) => Promise<LoginResult>;
+  deleteUser: (userId: string) => Promise<boolean>;
   signInWithGoogle: () => Promise<void>;
   logout: () => void;
   showAuthModal: boolean;
@@ -27,6 +42,7 @@ interface AuthContextType {
   canAddAdmins: boolean;
   canAddClients: boolean;
   canApproveUsers: boolean;
+  refreshUsers: () => Promise<void>;
 }
 
 // Master Superadmin user: Iluminatto Moraes
@@ -36,9 +52,17 @@ export const MASTER_USER: UserAccount = {
   email: 'iluminatto@gmail.com',
   role: 'superadmin',
   status: 'aprovado',
-  password: '@Vito4747',
   creci: 'Super Administrador',
   createdAt: '2026-01-01T00:00:00.000Z',
+};
+
+// A sessão (token HMAC + usuário) é gerenciada por src/lib/api.ts
+
+// Senhas nunca são persistidas no navegador nem no Firestore
+const stripPassword = (account: UserAccount): UserAccount => {
+  const safe: UserAccount = { ...account };
+  delete safe.password;
+  return safe;
 };
 
 // Helper to check and eliminate any stale references to Roberto Magalhães
@@ -48,40 +72,92 @@ const isRobertoReference = (str?: string): boolean => {
   return s.includes('roberto') || s.includes('magalh');
 };
 
+export const MASTER_EMAIL = 'iluminatto@gmail.com';
+
+/** A conta master é sempre Super Administrador, independente do que vier da origem. */
+const asMasterIfMasterEmail = (account: UserAccount): UserAccount => {
+  if (account.email?.toLowerCase() !== MASTER_EMAIL) return account;
+  return { ...account, role: 'superadmin', status: 'aprovado', creci: account.creci || 'Super Administrador' };
+};
+
 const sanitizeUser = (raw: any): UserAccount => {
   if (!raw || typeof raw !== 'object' || isRobertoReference(raw.name) || isRobertoReference(raw.email)) {
     return MASTER_USER;
   }
-  return raw as UserAccount;
+  return asMasterIfMasterEmail(raw as UserAccount);
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Purge any stale traces of Roberto immediately from localStorage on component mount
+  // Sessão restaurada apenas se existir token emitido pelo backend
   const [user, setUser] = useState<UserAccount | null>(() => {
     try {
+      if (!localStorage.getItem(AUTH_TOKEN_KEY)) {
+        // Sem token de backend não existe sessão: remove resíduos de sessões antigas
+        localStorage.removeItem('locadoc_auth_user');
+        return null;
+      }
       const saved = localStorage.getItem('locadoc_auth_user');
       if (saved) {
-        if (isRobertoReference(saved)) {
-          localStorage.setItem('locadoc_auth_user', JSON.stringify(MASTER_USER));
-          return MASTER_USER;
-        }
         const parsed = JSON.parse(saved);
-        if (parsed && !isRobertoReference(parsed.name) && !isRobertoReference(parsed.email)) {
-          return parsed;
+        if (parsed && parsed.id && !isRobertoReference(parsed.name) && !isRobertoReference(parsed.email)) {
+          return stripPassword(parsed);
         }
       }
     } catch (e) {
       console.error(e);
     }
-    // Default logged-in user is Master Admin Iluminatto Moraes
-    localStorage.setItem('locadoc_auth_user', JSON.stringify(MASTER_USER));
-    return MASTER_USER;
+    return null;
   });
 
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(() => !getAuthToken());
+
+  // Sessão expirada/revogada no servidor: limpa o estado e reabre o login
+  useEffect(() => {
+    const onSessionExpired = () => {
+      setUser(null);
+      setShowAuthModal(true);
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+  }, []);
+
+  // A lista de usuários exibida na interface vem do backend (fonte da verdade do CRUD)
+  const refreshUsers = async () => {
+    try {
+      const res = await apiFetch('/api/users');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data?.users)) {
+        setUsersList(data.users.map((u: UserAccount) => stripPassword(asMasterIfMasterEmail(u))));
+      }
+    } catch (e) {
+      console.warn('Não foi possível carregar os usuários do servidor:', e);
+    }
+  };
+
+  // Valida o token guardado no boot: token inválido não mantém sessão fantasma
+  useEffect(() => {
+    const validateSession = async () => {
+      if (!getAuthToken()) return;
+      try {
+        const res = await apiFetch('/api/auth/session');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data?.user) {
+          const fresh = stripPassword(sanitizeUser(data.user));
+          setUser(fresh);
+          localStorage.setItem('locadoc_auth_user', JSON.stringify(fresh));
+          await refreshUsers();
+        }
+      } catch (e) {
+        console.warn('Não foi possível validar a sessão agora:', e);
+      }
+    };
+    validateSession();
+  }, []);
   const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
 
   // Manage all users list with persistence in localStorage and Firestore
@@ -95,11 +171,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const cleanList = parsed.filter(
             (u) => !isRobertoReference(u.name) && !isRobertoReference(u.email)
           );
-          if (!cleanList.some((u) => u.email.toLowerCase() === 'iluminatto@gmail.com')) {
+          if (!cleanList.some((u) => u.email.toLowerCase() === MASTER_EMAIL)) {
             cleanList.unshift(MASTER_USER);
           }
-          localStorage.setItem('locadoc_users_db', JSON.stringify(cleanList));
-          return cleanList;
+          const passwordFree = cleanList.map((u) => stripPassword(asMasterIfMasterEmail(u)));
+          localStorage.setItem('locadoc_users_db', JSON.stringify(passwordFree));
+          return passwordFree;
         }
       }
     } catch (e) {
@@ -111,9 +188,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Save users to localStorage
   useEffect(() => {
-    const cleanList = usersList.filter(
-      (u) => !isRobertoReference(u.name) && !isRobertoReference(u.email)
-    );
+    const cleanList = usersList
+      .filter((u) => !isRobertoReference(u.name) && !isRobertoReference(u.email))
+      .map((u) => stripPassword(asMasterIfMasterEmail(u)));
     localStorage.setItem('locadoc_users_db', JSON.stringify(cleanList));
   }, [usersList]);
 
@@ -140,22 +217,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               continue;
             }
 
-            remoteUsers.push({
-              id: d.id,
-              name: dName || 'Usuário',
-              email: dEmail,
-              role: (data.role as UserRole) || 'cliente',
-              status: data.status || 'aprovado',
-              password: data.password || '',
-              creci: data.creci,
-              telefone: data.telefone,
-              createdAt: data.createdAt,
-              createdBy: data.createdBy,
-            });
+            remoteUsers.push(
+              asMasterIfMasterEmail({
+                id: d.id,
+                name: dName || 'Usuário',
+                email: dEmail,
+                role: (data.role as UserRole) || 'cliente',
+                status: data.status || 'aprovado',
+                creci: data.creci,
+                telefone: data.telefone,
+                createdAt: data.createdAt,
+                createdBy: data.createdBy,
+              })
+            );
           }
 
-          // Ensure master Iluminatto Moraes is always the primary user
-          if (!remoteUsers.some((u) => u.email.toLowerCase() === 'iluminatto@gmail.com')) {
+          // Ensure master Iluminatto Moraes is always the primary Super Administrador
+          if (!remoteUsers.some((u) => u.email.toLowerCase() === MASTER_EMAIL)) {
             remoteUsers.unshift(MASTER_USER);
           }
 
@@ -168,7 +246,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             email: MASTER_USER.email,
             role: MASTER_USER.role,
             status: MASTER_USER.status,
-            password: MASTER_USER.password,
             createdAt: MASTER_USER.createdAt,
           });
         }
@@ -226,18 +303,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.warn('Erro ao salvar usuário no Firestore:', err);
         }
       } else {
-        // Fallback to active master Iluminatto Moraes
+        // Sem Firebase: restaura a sessão local apenas com token de backend válido
         const saved = localStorage.getItem('locadoc_auth_user');
-        if (saved && !isRobertoReference(saved)) {
+        if (getAuthToken() && saved && !isRobertoReference(saved)) {
           try {
-            setUser(JSON.parse(saved));
+            setUser(stripPassword(JSON.parse(saved)));
           } catch (e) {
-            setUser(MASTER_USER);
-            localStorage.setItem('locadoc_auth_user', JSON.stringify(MASTER_USER));
+            setUser(null);
           }
         } else {
-          setUser(MASTER_USER);
-          localStorage.setItem('locadoc_auth_user', JSON.stringify(MASTER_USER));
+          setUser(null);
         }
       }
       setIsLoadingAuth(false);
@@ -256,53 +331,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const login = (emailOrUser: string, pass: string): LoginResult => {
-    const cleanInput = emailOrUser.trim().toLowerCase();
+  // Login real: a senha é verificada somente no backend (hash scrypt + MASTER_PASSWORD)
+  const login = async (emailOrUser: string, pass: string): Promise<LoginResult> => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailOrUser.trim(), password: pass }),
+      });
+      const data = await res.json().catch(() => null as any);
 
-    // Check Master login directly (accepts 'iluminatto' or 'iluminatto@gmail.com')
-    if (
-      (cleanInput === 'iluminatto' || cleanInput === 'iluminatto@gmail.com') &&
-      pass === '@Vito4747'
-    ) {
-      setUser(MASTER_USER);
-      localStorage.setItem('locadoc_auth_user', JSON.stringify(MASTER_USER));
-      setShowAuthModal(false);
-      return { success: true };
-    }
-
-    // Check across registered users
-    const found = usersList.find(
-      (u) =>
-        (u.email.toLowerCase() === cleanInput ||
-          u.name.toLowerCase() === cleanInput ||
-          u.email.split('@')[0].toLowerCase() === cleanInput) &&
-        u.password === pass
-    );
-
-    if (found) {
-      if (found.status === 'pendente') {
+      if (!res.ok || !data?.success || !data?.token) {
         return {
           success: false,
-          error: 'Esta conta está pendente de aprovação por um Administrador.',
-        };
-      }
-      if (found.status === 'bloqueado') {
-        return {
-          success: false,
-          error: 'Esta conta foi desativada temporariamente pelo Administrador.',
+          error: data?.error || 'E-mail/usuário ou senha incorretos.',
         };
       }
 
-      setUser(found);
-      localStorage.setItem('locadoc_auth_user', JSON.stringify(found));
+      const authenticated = stripPassword(sanitizeUser(data.user));
+      localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+      localStorage.setItem('locadoc_auth_user', JSON.stringify(authenticated));
+      setUser(authenticated);
+      setUsersList((prev) =>
+        prev.some((u) => u.id === authenticated.id)
+          ? prev.map((u) => (u.id === authenticated.id ? authenticated : u))
+          : [...prev, authenticated]
+      );
       setShowAuthModal(false);
+      // Superadmin/Admin passam a listar os usuários reais do backend
+      if (authenticated.role === 'superadmin' || authenticated.role === 'admin') {
+        await refreshUsers();
+      }
       return { success: true };
+    } catch (err) {
+      console.error('Falha no login:', err);
+      return {
+        success: false,
+        error: 'Não foi possível conectar ao servidor de autenticação. Tente novamente.',
+      };
     }
-
-    return {
-      success: false,
-      error: 'E-mail/usuário ou senha incorretos.',
-    };
   };
 
   // Self Registration: creates a condomino account
@@ -327,8 +394,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       name: name.trim(),
       email: cleanEmail,
       role: 'condomino',
-      status: 'aprovado', // Auto-approved for instant testing / access
-      password: pass,
+      status: 'aprovado',
       creci: creci?.trim(),
       telefone: telefone?.trim(),
       unidade: unidade?.trim(),
@@ -342,9 +408,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(newUser);
     localStorage.setItem('locadoc_auth_user', JSON.stringify(newUser));
 
-    // Sync to backend /api/auth/register
+    // O cadastro é autoritativo no backend: sem resposta válida não há sessão
     try {
-      await fetch('/api/auth/register', {
+      const res = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -358,8 +424,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           bloco: newUser.bloco,
         }),
       });
+      const data = await res.json().catch(() => null as any);
+      if (!res.ok || !data?.success) {
+        setUsersList((prev) => prev.filter((u) => u.id !== newUser.id));
+        setUser(null);
+        localStorage.removeItem('locadoc_auth_user');
+        return { success: false, error: data?.error || 'Não foi possível concluir o cadastro.' };
+      }
+      if (data.token) {
+        localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+        setShowAuthModal(false);
+      }
+      // O id definitivo é o do servidor (fonte da verdade)
+      if (data.user) {
+        const created = stripPassword(asMasterIfMasterEmail(data.user));
+        setUsersList((prev) => [...prev.filter((u) => u.id !== newUser.id), created]);
+        setUser(created);
+        localStorage.setItem('locadoc_auth_user', JSON.stringify(created));
+      }
     } catch (e) {
-      console.warn('Erro ao sincronizar com backend:', e);
+      console.warn('Erro ao cadastrar no backend:', e);
+      setUsersList((prev) => prev.filter((u) => u.id !== newUser.id));
+      setUser(null);
+      localStorage.removeItem('locadoc_auth_user');
+      return { success: false, error: 'Não foi possível conectar ao servidor para concluir o cadastro.' };
     }
 
     // Save to Firestore
@@ -370,7 +458,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: newUser.email,
         role: newUser.role,
         status: newUser.status,
-        password: newUser.password,
         creci: newUser.creci || '',
         telefone: newUser.telefone || '',
         unidade: newUser.unidade || '',
@@ -429,7 +516,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       email: cleanEmail,
       role,
       status: 'aprovado', // Created by admin is auto-approved
-      password: pass,
       creci: creci?.trim(),
       telefone: telefone?.trim(),
       unidade: unidade?.trim(),
@@ -443,12 +529,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Sync to backend /api/users
     try {
-      await fetch('/api/users', {
+      const res = await apiFetch('/api/users', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-id': user.id,
-          'x-user-email': user.email,
         },
         body: JSON.stringify({
           name: newUser.name,
@@ -462,8 +546,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           creci: newUser.creci,
         }),
       });
+      const data = await res.json().catch(() => null as any);
+      if (!res.ok) {
+        setUsersList((prev) => prev.filter((u) => u.id !== newUser.id));
+        return { success: false, error: data?.error || 'Falha ao cadastrar usuário no servidor.' };
+      }
+      // Substitui o registro local pelo registro oficial do servidor (id definitivo)
+      if (data?.user) {
+        const created = stripPassword(asMasterIfMasterEmail(data.user));
+        setUsersList((prev) => [...prev.filter((u) => u.id !== newUser.id), created]);
+        await refreshUsers();
+      }
     } catch (e) {
       console.warn('Erro ao sincronizar com backend:', e);
+      setUsersList((prev) => prev.filter((u) => u.id !== newUser.id));
+      return { success: false, error: 'Não foi possível conectar ao servidor para cadastrar o usuário.' };
     }
 
     try {
@@ -473,7 +570,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         email: newUser.email,
         role: newUser.role,
         status: newUser.status,
-        password: newUser.password,
         creci: newUser.creci || '',
         telefone: newUser.telefone || '',
         unidade: newUser.unidade || '',
@@ -509,30 +605,181 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e) {
       console.warn('Erro ao atualizar status no Firestore:', e);
     }
+
+    // Sync status to backend /api/users/:id/status
+    try {
+      const res = await apiFetch(`/api/users/${userId}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        console.warn('Backend recusou a alteração de status:', res.status);
+      } else {
+        await refreshUsers();
+      }
+    } catch (e) {
+      console.warn('Erro ao sincronizar status com backend:', e);
+    }
+  };
+
+  // Update user (full CRUD — name, email, password, role, contact info)
+  const updateUser = async (
+    userId: string,
+    changes: {
+      name?: string;
+      email?: string;
+      password?: string;
+      role?: UserRole;
+      creci?: string;
+      telefone?: string;
+      unidade?: string;
+      bloco?: string;
+      cpf?: string;
+    }
+  ): Promise<LoginResult> => {
+    if (!user || (user.role !== 'superadmin' && user.role !== 'admin')) {
+      return { success: false, error: 'Você não tem permissão para editar usuários.' };
+    }
+
+    const target = usersList.find((u) => u.id === userId);
+    if (!target) {
+      return { success: false, error: 'Usuário não encontrado.' };
+    }
+
+    if (target.id === MASTER_USER.id || target.email.toLowerCase() === 'iluminatto@gmail.com') {
+      return { success: false, error: 'O Administrador Principal (Iluminatto Moraes) não pode ser editado.' };
+    }
+
+    // Only the superadmin can edit other Administrators
+    if (target.role === 'admin' && user.role !== 'superadmin') {
+      return { success: false, error: 'Apenas o Administrador Principal pode editar outros Administradores.' };
+    }
+
+    const nextRole = changes.role || target.role;
+    if (nextRole === 'superadmin') {
+      return { success: false, error: 'O cargo de Super Administrador é exclusivo do Administrador Principal.' };
+    }
+    // Only the superadmin can promote users to admin or demote admins
+    if ((nextRole === 'admin' || target.role === 'admin') && user.role !== 'superadmin') {
+      return { success: false, error: 'Apenas o Administrador Principal pode promover ou rebaixar Administradores.' };
+    }
+
+    const cleanEmail = changes.email ? changes.email.trim().toLowerCase() : target.email;
+    if (usersList.some((u) => u.id !== userId && u.email.toLowerCase() === cleanEmail)) {
+      return { success: false, error: 'Já existe um usuário com este e-mail.' };
+    }
+
+    const updatedUser: UserAccount = {
+      ...target,
+      name: changes.name ? changes.name.trim() : target.name,
+      email: cleanEmail,
+      role: nextRole,
+      creci: changes.creci !== undefined ? changes.creci.trim() : target.creci,
+      telefone: changes.telefone !== undefined ? changes.telefone.trim() : target.telefone,
+      unidade: changes.unidade !== undefined ? changes.unidade.trim() : target.unidade,
+      bloco: changes.bloco !== undefined ? changes.bloco.trim() : target.bloco,
+      cpf: changes.cpf !== undefined ? changes.cpf.trim() : target.cpf,
+      updatedAt: new Date().toISOString(),
+      updatedBy: user.name,
+    };
+
+    setUsersList((prev) => prev.map((u) => (u.id === userId ? updatedUser : u)));
+
+    // Sync to backend /api/users/:id
+    try {
+      const res = await apiFetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: updatedUser.name,
+          email: updatedUser.email,
+          password: changes.password || undefined,
+          role: updatedUser.role,
+          cpf: updatedUser.cpf,
+          telefone: updatedUser.telefone,
+          unidade: updatedUser.unidade,
+          bloco: updatedUser.bloco,
+          creci: updatedUser.creci,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null as any);
+        return { success: false, error: data?.error || 'Falha ao salvar as alterações no servidor.' };
+      }
+      await refreshUsers();
+    } catch (e) {
+      console.warn('Erro ao sincronizar edição com backend:', e);
+      return { success: false, error: 'Não foi possível conectar ao servidor para salvar as alterações.' };
+    }
+
+    try {
+      await setDoc(
+        doc(db, 'users', userId),
+        {
+          displayName: updatedUser.name,
+          email: updatedUser.email,
+          role: updatedUser.role,
+          creci: updatedUser.creci || '',
+          telefone: updatedUser.telefone || '',
+          unidade: updatedUser.unidade || '',
+          bloco: updatedUser.bloco || '',
+          cpf: updatedUser.cpf || '',
+          updatedAt: updatedUser.updatedAt,
+          updatedBy: user.name,
+        },
+        { merge: true }
+      );
+    } catch (e) {
+      console.warn('Erro ao salvar edição no Firestore:', e);
+    }
+
+    return { success: true };
   };
 
   // Delete user
-  const deleteUser = async (userId: string) => {
+  const deleteUser = async (userId: string): Promise<boolean> => {
     const target = usersList.find((u) => u.id === userId);
-    if (!target) return;
+    if (!target) return false;
 
     if (target.id === MASTER_USER.id || target.email.toLowerCase() === 'iluminatto@gmail.com') {
       console.warn('O Administrador Principal (Iluminatto Moraes) não pode ser excluído.');
-      return;
+      return false;
     }
 
     if (target.role === 'admin' && user?.role !== 'superadmin') {
       console.warn('Apenas o Administrador Principal pode excluir outros Administradores.');
-      return;
+      return false;
+    }
+
+    // Exclusão é autoritativa no backend: se falhar, nada é removido localmente
+    if (user) {
+      try {
+        const res = await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          console.warn('Backend recusou a exclusão do usuário:', res.status);
+          return false;
+        }
+      } catch (e) {
+        console.warn('Erro ao sincronizar exclusão com backend:', e);
+        return false;
+      }
     }
 
     setUsersList((prev) => prev.filter((u) => u.id !== userId));
+    await refreshUsers();
 
     try {
       await deleteDoc(doc(db, 'users', userId));
     } catch (e) {
       console.warn('Erro ao excluir do Firestore:', e);
     }
+
+    return true;
   };
 
   const logout = async () => {
@@ -543,8 +790,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e) {
       console.error(e);
     }
+
+    // Revoga a sessão no servidor antes de limpar o cliente
+    try {
+      if (getAuthToken()) await apiFetch('/api/auth/logout', { method: 'POST', body: '{}' });
+    } catch (e) {
+      console.warn('Não foi possível revogar a sessão no servidor:', e);
+    }
     setUser(null);
-    localStorage.removeItem('locadoc_auth_user');
+    localStorage.removeItem(AUTH_USER_KEY);
+    localStorage.removeItem(AUTH_TOKEN_KEY);
     setShowAuthModal(true);
   };
 
@@ -563,6 +818,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         register,
         addUser,
         approveUser,
+        updateUser,
         deleteUser,
         signInWithGoogle,
         logout,
@@ -572,6 +828,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         canAddAdmins,
         canAddClients,
         canApproveUsers,
+        refreshUsers,
       }}
     >
       {children}

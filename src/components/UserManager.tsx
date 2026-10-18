@@ -4,11 +4,11 @@ import { UserAccount, UserRole } from '../types/contract';
 import { 
   Users, UserPlus, Shield, ShieldCheck, ShieldAlert, 
   Check, X, Trash2, Key, Mail, Phone, Lock, AlertCircle, 
-  Search, CheckCircle2, UserCheck, UserX, Building2, Home
+  Search, CheckCircle2, UserCheck, UserX, Building2, Home, Pencil
 } from 'lucide-react';
 
 export const UserManager: React.FC = () => {
-  const { user, usersList, addUser, approveUser, deleteUser, canAddAdmins, canAddClients } = useAuth();
+  const { user, usersList, addUser, updateUser, approveUser, deleteUser, canAddAdmins, canAddClients } = useAuth();
 
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState<'todos' | 'superadmin' | 'admin' | 'condomino' | 'cliente' | 'pendentes'>('todos');
@@ -28,7 +28,85 @@ export const UserManager: React.FC = () => {
   const [successMsg, setSuccessMsg] = useState('');
   const [confirmDeleteUserId, setConfirmDeleteUserId] = useState<string | null>(null);
 
+  // Edit (Update) modal state
+  const [editingUser, setEditingUser] = useState<UserAccount | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    role: 'condomino' as UserRole,
+    telefone: '',
+    creci: '',
+  });
+
   const isSuperAdmin = user?.role === 'superadmin';
+
+  const isMasterAccount = (u: UserAccount) =>
+    u.id === 'usr-master-iluminatto' || u.email.toLowerCase() === 'iluminatto@gmail.com';
+
+  const canEditAccount = (u: UserAccount) => {
+    if (isMasterAccount(u)) return false;
+    if (isSuperAdmin) return true;
+    // Admins can only edit non-admin accounts
+    return user?.role === 'admin' && u.role !== 'admin';
+  };
+
+  const handleOpenEdit = (u: UserAccount) => {
+    setErrorMsg('');
+    setSuccessMsg('');
+    setEditingUser(u);
+    setEditForm({
+      name: u.name,
+      email: u.email,
+      password: '',
+      role: u.role,
+      telefone: u.telefone || '',
+      creci: u.creci || '',
+    });
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    if (!editForm.name.trim() || !editForm.email.trim()) {
+      setErrorMsg('Preencha os campos obrigatórios (Nome e E-mail).');
+      return;
+    }
+
+    if (editForm.role === 'admin' && !isSuperAdmin) {
+      setErrorMsg('Apenas o Administrador Principal (Iluminatto Moraes) pode promover usuários a Administrador.');
+      return;
+    }
+
+    const res = await updateUser(editingUser.id, {
+      name: editForm.name,
+      email: editForm.email,
+      password: editForm.password.trim() || undefined,
+      role: editForm.role,
+      telefone: editForm.telefone,
+      creci: editForm.creci,
+    });
+
+    if (!res.success) {
+      setErrorMsg(res.error || 'Erro ao atualizar usuário.');
+    } else {
+      setSuccessMsg(`Usuário ${editForm.name} atualizado com sucesso!`);
+      setEditingUser(null);
+    }
+  };
+
+  const handleDeleteUser = async (u: UserAccount) => {
+    const ok = await deleteUser(u.id);
+    setConfirmDeleteUserId(null);
+    if (ok) {
+      setSuccessMsg(`Usuário ${u.name} excluído com sucesso.`);
+    } else {
+      setErrorMsg(`Não foi possível excluir ${u.name}. Verifique suas permissões.`);
+    }
+  };
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -327,6 +405,18 @@ export const UserManager: React.FC = () => {
                             </button>
                           )}
 
+                          {/* Edit: Superadmin edits anyone (except master). Admin edits non-admin accounts. */}
+                          {canEditAccount(u) && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEdit(u)}
+                              className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer"
+                              title="Editar Usuário"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                          )}
+
                           {/* Delete: Superadmin can delete anyone except himself. Admin can only delete clients. */}
                           {(isSuperAdmin || (u.role === 'cliente' && user?.role === 'admin')) && (
                             confirmDeleteUserId === u.id ? (
@@ -334,10 +424,7 @@ export const UserManager: React.FC = () => {
                                 <span className="text-[10px] text-red-700 font-bold px-1">Excluir?</span>
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    deleteUser(u.id);
-                                    setConfirmDeleteUserId(null);
-                                  }}
+                                  onClick={() => handleDeleteUser(u)}
                                   className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white text-[10px] font-bold rounded cursor-pointer"
                                 >
                                   Sim
@@ -510,6 +597,151 @@ export const UserManager: React.FC = () => {
                   className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-lg shadow-xs cursor-pointer"
                 >
                   Salvar Usuário
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Editar Usuário / Administrador */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-5 bg-blue-900 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-blue-500/20 text-blue-300 flex items-center justify-center font-bold">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm">Editar Usuário</h3>
+                  <p className="text-[11px] text-blue-200">
+                    {editingUser.name} • Função atual: {editingUser.role.toUpperCase()}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingUser(null)}
+                className="text-blue-200 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateUser} className="p-6 space-y-3.5">
+              {errorMsg && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                  {errorMsg}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Nome Completo *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editForm.name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                  placeholder="Nome do usuário"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  E-mail de Acesso *
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={editForm.email}
+                  onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value }))}
+                  placeholder="usuario@dominio.com.br"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Nova Senha (deixe em branco para manter)
+                </label>
+                <input
+                  type="password"
+                  value={editForm.password}
+                  onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))}
+                  placeholder="••••••••"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Tipo de Conta (Função) *
+                </label>
+                {isSuperAdmin ? (
+                  <select
+                    value={editForm.role}
+                    onChange={(e) => setEditForm((f) => ({ ...f, role: e.target.value as UserRole }))}
+                    className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-medium"
+                  >
+                    <option value="cliente">Cliente (Acesso a contratos e vistorias)</option>
+                    <option value="condomino">Condômino (Acesso restrito à própria unidade)</option>
+                    <option value="admin">Administrador (Pode gerenciar e aprovar clientes)</option>
+                  </select>
+                ) : (
+                  <div className="p-2.5 bg-slate-100 border border-slate-200 rounded-lg text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span>{editForm.role === 'admin' ? 'Administrador' : 'Cliente'}</span>
+                    <span className="text-[10px] text-slate-500">
+                      (Apenas o Administrador Principal altera funções)
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Telefone / WhatsApp
+                  </label>
+                  <input
+                    type="text"
+                    value={editForm.telefone}
+                    onChange={(e) => setEditForm((f) => ({ ...f, telefone: e.target.value }))}
+                    placeholder="(11) 98765-4321"
+                    className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    CRECI ou CPF
+                  </label>
+                  <input
+                    type="text"
+                    value={editForm.creci}
+                    onChange={(e) => setEditForm((f) => ({ ...f, creci: e.target.value }))}
+                    placeholder="Opcional"
+                    className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="px-3.5 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-blue-900 hover:bg-blue-800 text-white font-semibold text-xs rounded-lg shadow-xs cursor-pointer"
+                >
+                  Salvar Alterações
                 </button>
               </div>
             </form>

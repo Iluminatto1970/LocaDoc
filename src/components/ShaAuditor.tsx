@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 import { calculateSHA256 } from '../utils/defaults';
 import { ContractData } from '../types/contract';
 import { useAuth } from '../context/AuthContext';
@@ -96,7 +97,7 @@ export const ShaAuditor: React.FC<ShaAuditorProps> = ({
   const fetchServerStatus = async () => {
     setIsLoadingStatus(true);
     try {
-      const res = await fetch('/api/security/audit-status');
+      const res = await apiFetch('/api/security/audit-status');
       if (res.ok) {
         const data = await res.json();
         setServerStatus(data);
@@ -136,7 +137,7 @@ export const ShaAuditor: React.FC<ShaAuditorProps> = ({
 
       // Fire 7 rapid requests to trigger test rate limiter (threshold is 5 in 5s)
       const promises = Array.from({ length: 7 }).map(() =>
-        fetch('/api/security/test-rate-limit').then((res) => {
+        apiFetch('/api/security/test-rate-limit').then((res) => {
           lastStatus = res.status;
           if (res.status === 429) triggered429 = true;
           return res;
@@ -203,7 +204,7 @@ export const ShaAuditor: React.FC<ShaAuditorProps> = ({
     // ----------------------------------------------------
     updateTest('test-injection-shield', { status: 'running', details: 'Enviando payload com tags de script maliciosas para teste de sanitização...' });
     try {
-      const injectionRes = await fetch('/api/security/test-injection', {
+      const injectionRes = await apiFetch('/api/security/test-injection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

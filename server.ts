@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 dotenv.config();
@@ -10,10 +11,121 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ==========================================
+// AUTHENTICATION ENGINE (HMAC SESSION TOKENS)
+// ==========================================
+// Sessões são assinadas com HMAC-SHA256 e validadas somente no servidor.
+// O cliente nunca define sua identidade: apenas apresenta um token emitido no login.
+const AUTH_SECRET = (process.env.AUTH_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 horas
+
+interface SessionRecord {
+  userId: string;
+  expiresAt: number;
+}
+const sessions = new Map<string, SessionRecord>();
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 32).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+function verifyPassword(password: string, stored: string | undefined): boolean {
+  if (!password || !stored) return false;
+  if (!stored.startsWith('scrypt:')) {
+    // Compatibilidade com hashes legados (migrados no boot)
+    return stored === password;
+  }
+  const [, salt, hash] = stored.split(':');
+  if (!salt || !hash) return false;
+  const expected = Buffer.from(hash, 'hex');
+  const candidate = crypto.scryptSync(password, salt, 32);
+  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+}
+
+// A senha do Administrador Principal nunca fica no código nem no bundle:
+// vem de MASTER_PASSWORD (.env). Sem ela, uma senha aleatória é gerada por execução.
+const masterPasswordFromEnv = (process.env.MASTER_PASSWORD || '').trim();
+const MASTER_PASSWORD = masterPasswordFromEnv || crypto.randomBytes(12).toString('base64url');
+if (!masterPasswordFromEnv) {
+  console.warn('[SECURITY] MASTER_PASSWORD ausente no ambiente. Senha temporária do Administrador Principal nesta execução:');
+  console.warn(`           ${MASTER_PASSWORD}`);
+  console.warn('           Defina MASTER_PASSWORD no arquivo .env para fixar a senha.');
+}
+const MASTER_PASSWORD_HASH = hashPassword(MASTER_PASSWORD);
+
+function signTokenPayload(payload: string): string {
+  return crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+}
+
+function issueSessionToken(userId: string): string {
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const payload = Buffer.from(JSON.stringify({ sub: userId, exp: expiresAt, jti: crypto.randomUUID() })).toString('base64url');
+  const token = `${payload}.${signTokenPayload(payload)}`;
+  sessions.set(token, { userId, expiresAt });
+  return token;
+}
+
+function readSessionToken(req: express.Request): { userId: string } | null {
+  const header = req.headers.authorization;
+  if (!header || !header.toLowerCase().startsWith('bearer ')) return null;
+  const token = header.slice(7).trim();
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+
+  const expected = Buffer.from(signTokenPayload(payload));
+  const provided = Buffer.from(signature);
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) return null;
+
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  return { userId: session.userId };
+}
+
+// Limpeza periódica de sessões expiradas
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (session.expiresAt < now) sessions.delete(token);
+  }
+}, 600000);
+
+// Proteção contra força bruta no login (por IP + identificador)
+const loginAttempts = new Map<string, { count: number; resetTime: number }>();
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function registerLoginFailure(key: string) {
+  const now = Date.now();
+  const current = loginAttempts.get(key);
+  if (!current || now > current.resetTime) {
+    loginAttempts.set(key, { count: 1, resetTime: now + LOGIN_WINDOW_MS });
+    return;
+  }
+  current.count++;
+}
+
+function isLoginThrottled(key: string): boolean {
+  const current = loginAttempts.get(key);
+  if (!current) return false;
+  if (Date.now() > current.resetTime) {
+    loginAttempts.delete(key);
+    return false;
+  }
+  return current.count >= LOGIN_MAX_ATTEMPTS;
+}
+
 const app = express();
 const portArgIndex = process.argv.indexOf('--port');
 const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? parseInt(process.argv[portArgIndex + 1]) : null;
-const PORT = cliPort || (process.env.PORT ? parseInt(process.env.PORT) : 3000);
+const envPort = parseInt(process.env.PORT || '', 10);
+const PORT = (cliPort && cliPort > 0 ? cliPort : null) || (Number.isFinite(envPort) && envPort > 0 ? envPort : 3000);
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 // ==========================================
 // ANTI-DDOS & RATE LIMITING ENGINE (IN-MEMORY)
@@ -26,7 +138,10 @@ interface RateLimitBucket {
 }
 
 const ipBuckets = new Map<string, RateLimitBucket>();
+// Buckets separados para rotas caras (IA/OCR), para não consumir o limite geral
+const aiBuckets = new Map<string, RateLimitBucket>();
 const blockedIps = new Set<string>();
+const MAX_TRACKED_IPS = 20000;
 let totalRequestsIntercepted = 0;
 let totalBlockedRequests = 0;
 
@@ -34,7 +149,7 @@ let totalBlockedRequests = 0;
 interface SecurityEvent {
   timestamp: string;
   ip: string;
-  type: 'RATE_LIMIT_EXCEEDED' | 'BURST_ATTACK_DETECTED' | 'MALICIOUS_PAYLOAD' | 'INSPECTION';
+  type: 'RATE_LIMIT_EXCEEDED' | 'BURST_ATTACK_DETECTED' | 'MALICIOUS_PAYLOAD' | 'INSPECTION' | 'AUTH_FAILURE' | 'AUTH_REQUIRED' | 'PRIVILEGE_DENIED';
   detail: string;
 }
 const securityAuditLogs: SecurityEvent[] = [];
@@ -49,21 +164,41 @@ function recordSecurityEvent(ip: string, type: SecurityEvent['type'], detail: st
   if (securityAuditLogs.length > 100) securityAuditLogs.pop();
 }
 
-// Clean up stale rate limiting buckets every 5 minutes
+// Clean up stale rate limiting buckets every 5 minutes (e limita o crescimento da memória)
 setInterval(() => {
   const now = Date.now();
-  for (const [ip, bucket] of ipBuckets.entries()) {
-    if (now > bucket.resetTime && now > bucket.burstResetTime) {
-      ipBuckets.delete(ip);
+  for (const store of [ipBuckets, aiBuckets]) {
+    for (const [ip, bucket] of store.entries()) {
+      if (now > bucket.resetTime && now > bucket.burstResetTime) {
+        store.delete(ip);
+      }
     }
+    // Proteção contra exaustão de memória via IPs forjados/rotativos
+    if (store.size > MAX_TRACKED_IPS) store.clear();
   }
 }, 300000);
 
+// Only trust X-Forwarded-For when explicitly behind a trusted reverse proxy.
+// Otherwise any client could rotate the header and bypass rate limiting.
+function clientIp(req: express.Request): string {
+  const trustProxy = String(process.env.TRUST_PROXY || '').toLowerCase() === 'true';
+  if (trustProxy) {
+    const forwarded = req.headers['x-forwarded-for']?.toString().split(',')[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
 // Global Anti-DDoS & Rate Limiting Middleware
-const rateLimiterMiddleware = (maxRequests = 120, windowMs = 60000) => {
+const rateLimiterMiddleware = (
+  maxRequests = 120,
+  windowMs = 60000,
+  store: Map<string, RateLimitBucket> = ipBuckets,
+  burstLimit = 30
+) => {
   return (req: express.Request, res: express.Response, next: express.NextFunction) => {
     totalRequestsIntercepted++;
-    const rawIp = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const rawIp = clientIp(req);
     const now = Date.now();
 
     // Check if IP is temporarily blocked
@@ -76,7 +211,7 @@ const rateLimiterMiddleware = (maxRequests = 120, windowMs = 60000) => {
       });
     }
 
-    let bucket = ipBuckets.get(rawIp);
+    let bucket = store.get(rawIp);
     if (!bucket || now > bucket.resetTime) {
       bucket = {
         count: 1,
@@ -84,14 +219,14 @@ const rateLimiterMiddleware = (maxRequests = 120, windowMs = 60000) => {
         burstCount: 1,
         burstResetTime: now + 3000, // 3s burst window
       };
-      ipBuckets.set(rawIp, bucket);
+      store.set(rawIp, bucket);
     } else {
       bucket.count++;
-      
-      // Burst check (more than 30 requests in 3 seconds = probable burst/DDoS bot)
+
+      // Burst check (rajada acima do limite = provável bot/DDoS)
       if (now < bucket.burstResetTime) {
         bucket.burstCount++;
-        if (bucket.burstCount > 30) {
+        if (bucket.burstCount > burstLimit) {
           blockedIps.add(rawIp);
           setTimeout(() => blockedIps.delete(rawIp), 60000); // Block for 1 min
           totalBlockedRequests++;
@@ -133,22 +268,122 @@ const rateLimiterMiddleware = (maxRequests = 120, windowMs = 60000) => {
 // ==========================================
 // Note: We deliberately do NOT set 'X-Frame-Options: SAMEORIGIN' because the applet
 // must be embedded in Google AI Studio iframes (frame-ancestors handled via CSP by Nginx).
+// Origens extras autorizadas a chamar a API (separadas por vírgula).
+// A própria origem da aplicação é sempre aceita; nada de '*'.
+const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const host = req.headers.host;
+  let sameOrigin = true;
+  if (origin) {
+    try {
+      sameOrigin = new URL(origin).host === host || EXTRA_ALLOWED_ORIGINS.includes(origin);
+    } catch {
+      sameOrigin = false;
+    }
+  }
+
+  // CORS restrito: nunca reflete origem desconhecida e nunca usa curinga
+  if (origin && sameOrigin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '600');
+  }
+
+  // Anti-CSRF: requisições de origem externa não podem alterar estado
+  if (!sameOrigin && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    recordSecurityEvent(clientIp(req), 'PRIVILEGE_DENIED', `Origem não autorizada bloqueada: ${origin}`);
+    return res.status(403).json({
+      success: false,
+      error: 'Origem não autorizada para operações de escrita.',
+      code: 'CROSS_ORIGIN_BLOCKED',
+    });
+  }
+
+  if (req.method === 'OPTIONS') {
+    return res.status(sameOrigin ? 204 : 403).end();
+  }
+
   // Prevent MIME type sniffing
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  // XSS protection
+  // XSS protection (legado, complementado pela CSP)
   res.setHeader('X-XSS-Protection', '1; mode=block');
   // Referrer Policy
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Não vazar a aplicação (nem recursos) para outros contextos
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+  // Restringe APIs sensíveis do navegador
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  res.removeHeader('X-Powered-By');
+
+  // HSTS apenas quando a conexão é HTTPS (direto ou via proxy confiável)
+  const isHttps = req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+  if (isHttps) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+
+  // CSP: estrita em produção (o índice gerado não tem scripts inline);
+  // no dev o Vite/React Refresh injeta script inline, então a diretiva é relaxada.
+  const csp = IS_PROD
+    ? [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.cloudfunctions.net https://fonts.googleapis.com https://fonts.gstatic.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com",
+      ].join('; ')
+    : [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "img-src 'self' data: blob:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "connect-src 'self' ws: wss: https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://fonts.googleapis.com https://fonts.gstatic.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com",
+      ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
   next();
 });
 
 // Apply Rate Limiter to API routes (120 req/min)
 app.use('/api', rateLimiterMiddleware(120, 60000));
 
-// Support large payloads for PDF and document uploads (e.g. photos/scans)
-app.use(express.json({ limit: '60mb' }));
-app.use(express.urlencoded({ extended: true, limit: '60mb' }));
+// Limite mais rígido para rotas caras (OCR/IA), que consomem CPU e créditos de API
+app.use(
+  [
+    '/api/extract-documents',
+    '/api/ocr-extract-single',
+    '/api/gemini/test-connection',
+    '/api/llm/test-connection',
+  ],
+  rateLimiterMiddleware(20, 60000, aiBuckets, 8)
+);
+
+// Uploads de documentos e laudos carregam imagens em base64 e recebem um limite próprio.
+// Como estes parsers rodam ANTES do parser global, apenas estas rotas aceitam corpos grandes.
+const HEAVY_JSON_LIMIT = '40mb';
+app.use('/api/extract-documents', express.json({ limit: HEAVY_JSON_LIMIT }));
+app.use('/api/ocr-extract-single', express.json({ limit: HEAVY_JSON_LIMIT }));
+app.use('/api/contracts', express.json({ limit: '25mb' }));
+
+// Limite padrão enxuto para todas as demais rotas de API
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // Payload Sanitizer against injection attacks in JSON body
 app.use('/api', (req, res, next) => {
@@ -157,8 +392,15 @@ app.use('/api', (req, res, next) => {
       for (const key in obj) {
         const val = obj[key];
         if (typeof val === 'string') {
-          // Detect dangerous injection patterns
-          if (/<script\b[^>]*>([\s\S]*?)<\/script>/gi.test(val) || /javascript:/gi.test(val)) {
+          // Rejeita qualquer markup/handler ativo, não apenas <script>
+          const dangerous = [
+            /<\s*\/?\s*[a-z!]/i, // qualquer tag HTML (<img, <svg, <!-- ...)
+            /\bon[a-z]+\s*=/i, // handlers inline (onerror=, onload= ...)
+            /javascript\s*:/i,
+            /vbscript\s*:/i,
+            /data\s*:\s*text\/html/i,
+          ];
+          if (dangerous.some((pattern) => pattern.test(val))) {
             return true;
           }
         } else if (typeof val === 'object' && val !== null) {
@@ -169,7 +411,7 @@ app.use('/api', (req, res, next) => {
     };
 
     if (checkSuspicious(req.body)) {
-      const rawIp = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+      const rawIp = clientIp(req);
       recordSecurityEvent(rawIp, 'MALICIOUS_PAYLOAD', 'Tentativa de injeção de script bloqueada');
       return res.status(400).json({
         error: 'Payload inválido: detectados caracteres ou tags não permitidas pela política de segurança.',
@@ -177,6 +419,34 @@ app.use('/api', (req, res, next) => {
       });
     }
   }
+  next();
+});
+
+// ==========================================
+// AUTHENTICATION GATE — every /api route is private except login/register/health
+// ==========================================
+const PUBLIC_API_PATHS = new Set(['/auth/login', '/auth/register', '/health']);
+
+app.use('/api', (req, res, next) => {
+  if (PUBLIC_API_PATHS.has(req.path)) return next();
+
+  const requester = getRequester(req);
+  if (!requester) {
+    const rawIp = clientIp(req);
+    recordSecurityEvent(rawIp, 'AUTH_REQUIRED', `Acesso anônimo bloqueado: ${req.method} /api${req.path}`);
+    return res.status(401).json({
+      success: false,
+      error: 'Autenticação obrigatória. Faça login para acessar este recurso.',
+      code: 'AUTH_REQUIRED',
+    });
+  }
+  next();
+});
+
+// Rotas de configuração de IA/OCR e chaves de LLM: exclusivas de Administradores.
+// (chaves globais e consumo de créditos não ficam ao alcance de condôminos)
+app.use(['/api/gemini', '/api/llm', '/api/extract-documents', '/api/ocr-extract-single'], (req, res, next) => {
+  if (!requireAdminRole(req, res)) return;
   next();
 });
 
@@ -1074,7 +1344,8 @@ const backendUsers: BackendUser[] = [
     email: 'iluminatto@gmail.com',
     role: 'superadmin',
     status: 'aprovado',
-    password: '@Vito4747',
+    // Autenticado exclusivamente via MASTER_PASSWORD_HASH (ver /api/auth/login)
+    password: '',
     creci: 'Super Administrador',
     createdAt: '2026-01-01T00:00:00.000Z',
     createdBy: 'sistema',
@@ -1107,6 +1378,23 @@ const backendUsers: BackendUser[] = [
     createdBy: 'Iluminatto Moraes',
   },
 ];
+
+// Migra qualquer senha em texto puro das sementes para hash scrypt no boot
+for (const seededUser of backendUsers) {
+  if (seededUser.password && !seededUser.password.startsWith('scrypt:')) {
+    seededUser.password = hashPassword(seededUser.password);
+  }
+}
+
+// A conta master (iluminatto@gmail.com) é sempre Super Administrador e ativa
+const masterAccount = backendUsers.find(u => u.email.toLowerCase() === 'iluminatto@gmail.com');
+if (masterAccount) {
+  masterAccount.role = 'superadmin';
+  masterAccount.status = 'aprovado';
+}
+if (!masterAccount) {
+  console.warn('[SECURITY] Conta master iluminatto@gmail.com não encontrada na base em memória.');
+}
 
 // Backend In-Memory Contracts Store for Backend Isolation
 const backendContracts: any[] = [
@@ -1141,30 +1429,57 @@ function sanitizeBackendUser(user: BackendUser) {
   return safeUser;
 }
 
+// Identidade derivada EXCLUSIVAMENTE do token de sessão assinado.
+// Headers como x-user-id / x-user-email são ignorados por completo.
 function getRequester(req: express.Request): BackendUser | null {
-  const reqUserId = (req.headers['x-user-id'] as string)?.trim();
-  const reqEmail = (req.headers['x-user-email'] as string)?.trim()?.toLowerCase();
-  
-  if (reqUserId) {
-    const found = backendUsers.find(u => u.id === reqUserId);
-    if (found) return found;
+  const session = readSessionToken(req);
+  if (!session) return null;
+  return backendUsers.find(u => u.id === session.userId) || null;
+}
+
+// Conta master (Administrador Principal): protegida por id E por e-mail
+function isMasterAccount(user: { id?: string; email?: string } | undefined | null): boolean {
+  if (!user) return false;
+  return user.id === 'usr-master-iluminatto' || (user.email || '').trim().toLowerCase() === 'iluminatto@gmail.com';
+}
+
+// Guarda para rotas administrativas (painel de segurança, auditoria, diagnóstico)
+function requireAdminRole(req: express.Request, res: express.Response): boolean {
+  const requester = getRequester(req);
+  if (!requester || (requester.role !== 'superadmin' && requester.role !== 'admin')) {
+    recordSecurityEvent(clientIp(req), 'PRIVILEGE_DENIED', `Acesso administrativo negado: ${req.method} /api${req.path}`);
+    res.status(403).json({ success: false, error: 'Acesso restrito a Administradores.', code: 'ADMIN_REQUIRED' });
+    return false;
   }
-  if (reqEmail) {
-    const found = backendUsers.find(u => u.email.toLowerCase() === reqEmail);
-    if (found) return found;
+  return true;
+}
+
+// Invalida todas as sessões abertas de um usuário (troca de senha, bloqueio, exclusão)
+function revokeUserSessions(userId: string) {
+  for (const [token, session] of sessions.entries()) {
+    if (session.userId === userId) sessions.delete(token);
   }
-  return null;
 }
 
 // 1. Auth: Register (Condômino ou Usuário)
 app.post('/api/auth/register', (req, res) => {
   const { name, email, password, role, cpf, telefone, unidade, bloco, condominioNome } = req.body || {};
 
-  if (!name || !email || !password) {
+  if (typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' || !name.trim() || !email.trim() || !password) {
     return res.status(400).json({ success: false, error: 'Nome, e-mail e senha são obrigatórios.' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
+  if (name.trim().length > 120 || email.trim().length > 254 || password.length > 200 || password.length < 6) {
+    return res.status(400).json({ success: false, error: 'Dados inválidos: a senha deve ter entre 6 e 200 caracteres.' });
+  }  const cleanEmail = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ success: false, error: 'E-mail inválido.' });
+  }
+
+  if (cleanEmail === 'iluminatto@gmail.com') {
+    return res.status(403).json({ success: false, error: 'O e-mail do Administrador Principal é reservado.' });
+  }
+
   if (backendUsers.some(u => u.email.toLowerCase() === cleanEmail)) {
     return res.status(409).json({ success: false, error: 'Este e-mail já está cadastrado no sistema.' });
   }
@@ -1178,7 +1493,7 @@ app.post('/api/auth/register', (req, res) => {
     email: cleanEmail,
     role: assignedRole,
     status: 'aprovado',
-    password: password.trim(),
+    password: hashPassword(String(password).trim()),
     cpf: cpf?.trim(),
     telefone: telefone?.trim(),
     unidade: unidade?.trim(),
@@ -1194,29 +1509,59 @@ app.post('/api/auth/register', (req, res) => {
     success: true,
     message: 'Conta de condômino cadastrada com sucesso!',
     user: sanitizeBackendUser(newUser),
+    token: issueSessionToken(newUser.id),
   });
 });
 
 // 2. Auth: Login
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body || {};
-  if (!email || !password) {
+
+  // Tipo estrito: impede injeção de operadores NoSQL no corpo do login
+  if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
     return res.status(400).json({ success: false, error: 'E-mail e senha são obrigatórios.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
+  const throttleKey = `${clientIp(req)}|${cleanEmail}`;
 
-  // Master login check
-  if ((cleanEmail === 'iluminatto' || cleanEmail === 'iluminatto@gmail.com') && password === '@Vito4747') {
-    const master = backendUsers.find(u => u.id === 'usr-master-iluminatto')!;
-    return res.json({ success: true, user: sanitizeBackendUser(master) });
+  if (isLoginThrottled(throttleKey)) {
+    recordSecurityEvent(clientIp(req), 'AUTH_FAILURE', `Login bloqueado por excesso de tentativas: ${cleanEmail}`);
+    return res.status(429).json({
+      success: false,
+      error: 'Muitas tentativas de login. Aguarde 15 minutos e tente novamente.',
+      code: 'LOGIN_THROTTLED',
+    });
+  }
+
+  const finishSuccess = (user: BackendUser) => {
+    loginAttempts.delete(throttleKey);
+    return res.json({
+      success: true,
+      user: sanitizeBackendUser(user),
+      token: issueSessionToken(user.id),
+      expiresInSeconds: Math.floor(SESSION_TTL_MS / 1000),
+    });
+  };
+
+  // Master login: senha validada contra hash scrypt de MASTER_PASSWORD (.env)
+  if (cleanEmail === 'iluminatto' || cleanEmail === 'iluminatto@gmail.com') {
+    const master = backendUsers.find(u => u.id === 'usr-master-iluminatto');
+    if (!master || !verifyPassword(password, MASTER_PASSWORD_HASH)) {
+      registerLoginFailure(throttleKey);
+      recordSecurityEvent(clientIp(req), 'AUTH_FAILURE', `Senha master inválida para ${cleanEmail}`);
+      return res.status(401).json({ success: false, error: 'Credenciais inválidas. Verifique seu e-mail e senha.' });
+    }
+    return finishSuccess(master);
   }
 
   const user = backendUsers.find(
-    u => (u.email.toLowerCase() === cleanEmail || u.name.toLowerCase() === cleanEmail) && u.password === password
+    u => u.email.toLowerCase() === cleanEmail || u.name.toLowerCase() === cleanEmail
   );
 
-  if (!user) {
+  if (!user || !verifyPassword(password, user.password)) {
+    registerLoginFailure(throttleKey);
+    recordSecurityEvent(clientIp(req), 'AUTH_FAILURE', `Credenciais inválidas para ${cleanEmail}`);
     return res.status(401).json({ success: false, error: 'Credenciais inválidas. Verifique seu e-mail e senha.' });
   }
 
@@ -1228,24 +1573,27 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(403).json({ success: false, error: 'Esta conta está pendente de aprovação pela Administração.' });
   }
 
-  return res.json({
-    success: true,
-    user: sanitizeBackendUser(user),
-  });
+  return finishSuccess(user);
+});
+
+// 2b. Auth: sessão atual (valida o token e devolve o usuário autenticado)
+app.get('/api/auth/session', (req, res) => {
+  const requester = getRequester(req)!;
+  return res.json({ success: true, user: sanitizeBackendUser(requester) });
+});
+
+// 2c. Auth: logout (revoga o token atual no servidor)
+app.post('/api/auth/logout', (req, res) => {
+  const header = req.headers.authorization || '';
+  const token = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
+  if (token) sessions.delete(token);
+  return res.json({ success: true, message: 'Sessão encerrada.' });
 });
 
 // 3. Users Management: GET /api/users
 // Strictest LGPD rule: Admins see all users. Condômino only gets their OWN profile!
 app.get('/api/users', (req, res) => {
-  const requester = getRequester(req);
-
-  if (!requester) {
-    // Return sanitized users list for local admin UI or default master
-    return res.json({
-      success: true,
-      users: backendUsers.map(sanitizeBackendUser),
-    });
-  }
+  const requester = getRequester(req)!;
 
   if (requester.role === 'superadmin' || requester.role === 'admin') {
     return res.json({
@@ -1265,28 +1613,53 @@ app.get('/api/users', (req, res) => {
 
 // 4. Users Management: POST /api/users (Admin / Superadmin only)
 app.post('/api/users', (req, res) => {
-  const requester = getRequester(req);
+  const requester = getRequester(req)!;
   const { name, email, password, role, cpf, telefone, unidade, bloco, creci } = req.body || {};
 
-  if (requester && requester.role !== 'superadmin' && requester.role !== 'admin') {
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
+    recordSecurityEvent(clientIp(req), 'PRIVILEGE_DENIED', `Tentativa de criar usuário por ${requester.role}`);
     return res.status(403).json({
       success: false,
       error: 'Acesso negado: apenas Administradores podem cadastrar usuários ou condôminos no sistema.',
     });
   }
 
-  if (role === 'admin' && requester && requester.role !== 'superadmin') {
+  // Nenhuma requisição — nem do superadmin — pode criar outro superadmin
+  if (role === 'superadmin') {
+    recordSecurityEvent(clientIp(req), 'PRIVILEGE_DENIED', 'Tentativa de criar segundo superadministrador');
+    return res.status(400).json({
+      success: false,
+      error: 'O cargo de Super Administrador é exclusivo do Administrador Principal.',
+    });
+  }
+
+  if (role === 'admin' && requester.role !== 'superadmin') {
+    recordSecurityEvent(clientIp(req), 'PRIVILEGE_DENIED', `Tentativa de criar Administrador por ${requester.name}`);
     return res.status(403).json({
       success: false,
       error: 'Apenas o Administrador Principal (Iluminatto Moraes) pode criar novos Administradores.',
     });
   }
 
-  if (!name || !email || !password) {
+  if (typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' || !name.trim() || !email.trim() || !password) {
     return res.status(400).json({ success: false, error: 'Nome, e-mail e senha são obrigatórios.' });
   }
 
+  if (name.trim().length > 120 || email.trim().length > 254 || password.length > 200) {
+    return res.status(400).json({ success: false, error: 'Um ou mais campos excedem o tamanho máximo permitido.' });
+  }
+
+  if (!['admin', 'condomino', 'cliente'].includes(role || 'condomino')) {
+    return res.status(400).json({ success: false, error: 'Função (role) inválida.' });
+  }
+
   const cleanEmail = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).json({ success: false, error: 'E-mail inválido.' });
+  }
+  if (cleanEmail === 'iluminatto@gmail.com') {
+    return res.status(403).json({ success: false, error: 'O e-mail do Administrador Principal é reservado.' });
+  }
   if (backendUsers.some(u => u.email.toLowerCase() === cleanEmail)) {
     return res.status(409).json({ success: false, error: 'Já existe um usuário cadastrado com este e-mail.' });
   }
@@ -1297,14 +1670,14 @@ app.post('/api/users', (req, res) => {
     email: cleanEmail,
     role: role || 'condomino',
     status: 'aprovado',
-    password: password.trim(),
-    cpf: cpf?.trim(),
-    telefone: telefone?.trim(),
-    unidade: unidade?.trim(),
-    bloco: bloco?.trim(),
-    creci: creci?.trim(),
+    password: hashPassword(password),
+    cpf: typeof cpf === 'string' ? cpf.trim() : undefined,
+    telefone: typeof telefone === 'string' ? telefone.trim() : undefined,
+    unidade: typeof unidade === 'string' ? unidade.trim() : undefined,
+    bloco: typeof bloco === 'string' ? bloco.trim() : undefined,
+    creci: typeof creci === 'string' ? creci.trim() : undefined,
     createdAt: new Date().toISOString(),
-    createdBy: requester?.name || 'Administrador',
+    createdBy: requester.name,
   };
 
   backendUsers.push(newUser);
@@ -1318,8 +1691,8 @@ app.post('/api/users', (req, res) => {
 
 // 5. Users Management: PUT /api/users/:id/status
 app.put('/api/users/:id/status', (req, res) => {
-  const requester = getRequester(req);
-  if (requester && requester.role !== 'superadmin' && requester.role !== 'admin') {
+  const requester = getRequester(req)!;
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
     return res.status(403).json({ success: false, error: 'Apenas Administradores podem alterar o status de usuários.' });
   }
 
@@ -1331,21 +1704,96 @@ app.put('/api/users/:id/status', (req, res) => {
     return res.status(404).json({ success: false, error: 'Usuário não encontrado.' });
   }
 
-  if (user.id === 'usr-master-iluminatto') {
+  if (isMasterAccount(user)) {
     return res.status(400).json({ success: false, error: 'O Administrador Principal não pode ser alterado.' });
   }
 
   if (status && ['aprovado', 'bloqueado', 'pendente'].includes(status)) {
     user.status = status;
+    // Conta bloqueada perde imediatamente as sessões ativas
+    if (status === 'bloqueado') revokeUserSessions(user.id);
   }
 
   return res.json({ success: true, message: `Status alterado para ${status}.`, user: sanitizeBackendUser(user) });
 });
 
+// 5b. Users Management: PUT /api/users/:id (Edição completa — nome, e-mail, senha, função/role)
+app.put('/api/users/:id', (req, res) => {
+  const requester = getRequester(req)!;
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Apenas Administradores podem editar usuários.' });
+  }
+
+  const { id } = req.params;
+  const target = backendUsers.find(u => u.id === id);
+
+  if (!target) {
+    return res.status(404).json({ success: false, error: 'Usuário não encontrado.' });
+  }
+
+  if (isMasterAccount(target)) {
+    return res.status(400).json({ success: false, error: 'O Administrador Principal (Iluminatto Moraes) não pode ser editado.' });
+  }
+
+  // Apenas o superadmin pode editar contas já promovidas a Administrador
+  if (target.role === 'admin' && requester.role !== 'superadmin') {
+    return res.status(403).json({ success: false, error: 'Apenas o Administrador Principal pode editar outros Administradores.' });
+  }
+
+  const { name, email, password, role, cpf, telefone, unidade, bloco, creci } = req.body || {};
+
+  const nextRole = role || target.role;
+  if (nextRole === 'superadmin') {
+    return res.status(400).json({ success: false, error: 'O cargo de Super Administrador é exclusivo do Administrador Principal.' });
+  }
+  if ((nextRole === 'admin' || target.role === 'admin') && requester.role !== 'superadmin') {
+    return res.status(403).json({ success: false, error: 'Apenas o Administrador Principal pode promover ou rebaixar Administradores.' });
+  }
+
+  if (name !== undefined && (typeof name !== 'string' || name.trim().length > 120)) {
+    return res.status(400).json({ success: false, error: 'Nome inválido ou acima do tamanho máximo.' });
+  }
+  if (email !== undefined && (typeof email !== 'string' || email.trim().length > 254)) {
+    return res.status(400).json({ success: false, error: 'E-mail inválido ou acima do tamanho máximo.' });
+  }
+  if (password !== undefined && (typeof password !== 'string' || password.length > 200)) {
+    return res.status(400).json({ success: false, error: 'Senha acima do tamanho máximo permitido.' });
+  }
+
+  const cleanEmail = email ? String(email).trim().toLowerCase() : target.email;
+  if (backendUsers.some(u => u.id !== target.id && u.email.toLowerCase() === cleanEmail)) {
+    return res.status(409).json({ success: false, error: 'Já existe um usuário cadastrado com este e-mail.' });
+  }
+  // Ninguém pode assumir o e-mail do Administrador Principal
+  if (cleanEmail === 'iluminatto@gmail.com' && !isMasterAccount(target)) {
+    return res.status(403).json({ success: false, error: 'O e-mail do Administrador Principal é reservado.' });
+  }
+
+  target.name = name ? String(name).trim() : target.name;
+  target.email = cleanEmail;
+  target.role = nextRole;
+  const passwordChanged = Boolean(password);
+  if (passwordChanged) target.password = hashPassword(String(password));
+  if (cpf !== undefined) target.cpf = cpf?.trim();
+  if (telefone !== undefined) target.telefone = telefone?.trim();
+  if (unidade !== undefined) target.unidade = unidade?.trim();
+  if (bloco !== undefined) target.bloco = bloco?.trim();
+  if (creci !== undefined) target.creci = creci?.trim();
+
+  // Após troca de senha, todas as sessões antigas são invalidadas
+  if (passwordChanged) revokeUserSessions(target.id);
+
+  return res.json({
+    success: true,
+    message: `Usuário ${target.name} atualizado com sucesso.`,
+    user: sanitizeBackendUser(target),
+  });
+});
+
 // 6. Users Management: DELETE /api/users/:id
 app.delete('/api/users/:id', (req, res) => {
-  const requester = getRequester(req);
-  if (requester && requester.role !== 'superadmin' && requester.role !== 'admin') {
+  const requester = getRequester(req)!;
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
     return res.status(403).json({ success: false, error: 'Apenas Administradores podem excluir usuários.' });
   }
 
@@ -1356,21 +1804,22 @@ app.delete('/api/users/:id', (req, res) => {
     return res.status(404).json({ success: false, error: 'Usuário não encontrado.' });
   }
 
-  if (id === 'usr-master-iluminatto') {
+  const toDelete = backendUsers[index];
+  if (isMasterAccount(toDelete)) {
     return res.status(400).json({ success: false, error: 'O Administrador Principal (Iluminatto Moraes) não pode ser excluído.' });
   }
 
   const deleted = backendUsers.splice(index, 1)[0];
+  revokeUserSessions(deleted.id);
   return res.json({ success: true, message: `Usuário ${deleted.name} removido com sucesso.` });
 });
 
 // 7. Condôminos Specific API: GET /api/condominos
 // Retorna a lista de condôminos da administração, ou SOMENTE os dados do próprio condômino
 app.get('/api/condominos', (req, res) => {
-  const requester = getRequester(req);
+  const requester = getRequester(req)!;
 
-  // If no auth header or admin/superadmin, return all condôminos
-  if (!requester || requester.role === 'superadmin' || requester.role === 'admin') {
+  if (requester.role === 'superadmin' || requester.role === 'admin') {
     const list = backendUsers.filter(u => u.role === 'condomino' || u.role === 'cliente');
     return res.json({
       success: true,
@@ -1390,14 +1839,17 @@ app.get('/api/condominos', (req, res) => {
 
 // 8. Condôminos Specific API: POST /api/condominos (Admin only)
 app.post('/api/condominos', (req, res) => {
-  const requester = getRequester(req);
-  if (requester && requester.role !== 'superadmin' && requester.role !== 'admin') {
+  const requester = getRequester(req)!;
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
     return res.status(403).json({ success: false, error: 'Apenas Administradores podem cadastrar novos condôminos.' });
   }
 
   const { name, email, password, cpf, telefone, unidade, bloco, condominioNome } = req.body || {};
-  if (!name || !email) {
+  if (typeof name !== 'string' || typeof email !== 'string' || !name.trim() || !email.trim()) {
     return res.status(400).json({ success: false, error: 'Nome e e-mail são obrigatórios.' });
+  }
+  if (name.trim().length > 120 || email.trim().length > 254 || (password !== undefined && typeof password !== 'string')) {
+    return res.status(400).json({ success: false, error: 'Dados inválidos ou acima do tamanho máximo permitido.' });
   }
 
   const cleanEmail = email.trim().toLowerCase();
@@ -1411,7 +1863,7 @@ app.post('/api/condominos', (req, res) => {
     email: cleanEmail,
     role: 'condomino',
     status: 'aprovado',
-    password: password?.trim() || '123456',
+    password: hashPassword(password?.trim() || crypto.randomBytes(9).toString('base64url')),
     cpf: cpf?.trim(),
     telefone: telefone?.trim(),
     unidade: unidade?.trim() || 'Apto a Definir',
@@ -1435,9 +1887,9 @@ app.post('/api/condominos', (req, res) => {
 // - Superadmin / Admin: sees all contracts.
 // - Condômino: sees ONLY their own contracts (userId matching, or locatario email/cpf matching)!
 app.get('/api/contracts', (req, res) => {
-  const requester = getRequester(req);
+  const requester = getRequester(req)!;
 
-  if (!requester || requester.role === 'superadmin' || requester.role === 'admin') {
+  if (requester.role === 'superadmin' || requester.role === 'admin') {
     return res.json({
       success: true,
       contracts: backendContracts,
@@ -1469,14 +1921,14 @@ app.get('/api/contracts', (req, res) => {
 // Prevents condômino from viewing another condômino's contract by direct ID
 app.get('/api/contracts/:id', (req, res) => {
   const { id } = req.params;
-  const requester = getRequester(req);
+  const requester = getRequester(req)!;
   const contract = backendContracts.find(c => c.id === id);
 
   if (!contract) {
     return res.status(404).json({ success: false, error: 'Contrato não encontrado.' });
   }
 
-  if (requester && requester.role !== 'superadmin' && requester.role !== 'admin') {
+  if (requester.role !== 'superadmin' && requester.role !== 'admin') {
     const isOwner = contract.userId === requester.id;
     const isLocatarioEmail = contract.locatario?.email && contract.locatario.email.toLowerCase() === requester.email.toLowerCase();
     const isLocatarioCpf = requester.cpf && contract.locatario?.cpf && (
@@ -1497,18 +1949,23 @@ app.get('/api/contracts/:id', (req, res) => {
 
 // 11. Contracts API: POST /api/contracts
 app.post('/api/contracts', (req, res) => {
-  const requester = getRequester(req);
+  const requester = getRequester(req)!;
   const contractData = req.body;
 
   if (!contractData || !contractData.id) {
     return res.status(400).json({ success: false, error: 'Dados de contrato inválidos.' });
   }
 
-  if (requester && (requester.role === 'cliente' || requester.role === 'condomino')) {
+  if (requester.role === 'cliente' || requester.role === 'condomino') {
     return res.status(403).json({
       success: false,
       error: 'Apenas a Administração tem permissão para emitir e salvar novos contratos no sistema.',
     });
+  }
+
+  // Validação do identificador do contrato antes de persistir
+  if (typeof contractData.id !== 'string' || !/^[\w.-]{1,128}$/.test(contractData.id)) {
+    return res.status(400).json({ success: false, error: 'Identificador de contrato inválido.' });
   }
 
   const existingIdx = backendContracts.findIndex(c => c.id === contractData.id);
@@ -1549,7 +2006,8 @@ app.get('/api/health', (req, res) => {
 
 // Security & DDoS Audit Status Endpoint
 app.get('/api/security/audit-status', (req, res) => {
-  const rawIp = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  if (!requireAdminRole(req, res)) return;
+  const rawIp = clientIp(req);
   const bucket = ipBuckets.get(rawIp);
   
   res.json({
@@ -1590,8 +2048,10 @@ app.get('/api/security/audit-status', (req, res) => {
 // Used by the Audit Panel to simulate bursts and verify HTTP 429 response
 const testBuckets = new Map<string, { count: number; resetTime: number }>();
 app.get('/api/security/test-rate-limit', (req, res) => {
-  const rawIp = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+  if (!requireAdminRole(req, res)) return;
+  const rawIp = clientIp(req);
   const now = Date.now();
+  if (testBuckets.size > 1000) testBuckets.clear();
   let b = testBuckets.get(rawIp);
 
   if (!b || now > b.resetTime) {
@@ -1622,6 +2082,7 @@ app.get('/api/security/test-rate-limit', (req, res) => {
 
 // Test Injection / XSS Sanitization Endpoint
 app.post('/api/security/test-injection', (req, res) => {
+  if (!requireAdminRole(req, res)) return;
   // If request reached here without being intercepted by sanitizer middleware, payload was clean
   res.json({
     status: 'clean',
@@ -1630,7 +2091,7 @@ app.post('/api/security/test-injection', (req, res) => {
 });
 
 async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+  const isProd = IS_PROD;
 
   if (!isProd) {
     const vite = await createViteServer({

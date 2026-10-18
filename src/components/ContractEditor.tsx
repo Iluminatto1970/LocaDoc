@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import { apiFetch } from '../lib/api';
 import { ContractData, GarantiaData, UploadedDocFile } from '../types/contract';
 import { numeroPorExtensoReais, calculateSHA256 } from '../utils/defaults';
 import { useAuth } from '../context/AuthContext';
@@ -77,7 +78,7 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
       });
       const base64 = await base64Promise;
 
-      const res = await fetch('/api/ocr-extract-single', {
+      const res = await apiFetch('/api/ocr-extract-single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -151,7 +152,7 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
         });
       }
 
-      const res = await fetch('/api/extract-documents', {
+      const res = await apiFetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

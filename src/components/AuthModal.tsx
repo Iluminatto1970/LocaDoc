@@ -6,7 +6,7 @@ export const AuthModal: React.FC = () => {
   const { showAuthModal, setShowAuthModal, login, register, isAuthenticated, signInWithGoogle } = useAuth();
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('iluminatto@gmail.com');
-  const [password, setPassword] = useState('@Vito4747');
+  const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [creci, setCreci] = useState('');
   const [telefone, setTelefone] = useState('');
@@ -17,11 +17,11 @@ export const AuthModal: React.FC = () => {
     return null;
   }
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccessMsg('');
-    const res = login(email, password);
+    const res = await login(email, password);
     if (!res.success) {
       setError(res.error || 'Credenciais inválidas. Verifique seu login e senha.');
     }
@@ -42,12 +42,6 @@ export const AuthModal: React.FC = () => {
       setSuccessMsg(res.error || 'Solicitação enviada com sucesso! Aguarde a aprovação do Administrador.');
       setTab('login');
     }
-  };
-
-  const handleQuickMaster = () => {
-    setEmail('iluminatto@gmail.com');
-    setPassword('@Vito4747');
-    login('iluminatto@gmail.com', '@Vito4747');
   };
 
   return (
@@ -139,7 +133,6 @@ export const AuthModal: React.FC = () => {
                   <label className="block text-xs font-semibold text-slate-700">
                     Senha
                   </label>
-                  <span className="text-[11px] text-amber-700 font-medium">Adm padrão: @Vito4747</span>
                 </div>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
@@ -196,22 +189,10 @@ export const AuthModal: React.FC = () => {
                 <ArrowRight className="w-4 h-4" />
               </button>
 
-              {/* Master Admin Quick Access */}
-              <div className="pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={handleQuickMaster}
-                  className="w-full p-2.5 text-left bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors flex items-center justify-between"
-                >
-                  <div>
-                    <p className="text-xs font-bold text-slate-900">Iluminatto Moraes</p>
-                    <p className="text-[11px] text-amber-800">Administrador Geral • Senha: @Vito4747</p>
-                  </div>
-                  <span className="text-[11px] font-semibold text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded">
-                    Entrar como Adm
-                  </span>
-                </button>
-              </div>
+              <p className="pt-3 border-t border-slate-100 text-[11px] text-slate-500 leading-tight">
+                As credenciais são verificadas no servidor. Em caso de perda da senha do Administrador Principal,
+                redefina MASTER_PASSWORD no arquivo .env e reinicie a aplicação.
+              </p>
             </form>
           ) : (
             <div className="space-y-4">
