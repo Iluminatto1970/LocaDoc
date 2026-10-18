@@ -261,6 +261,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
+      // Sessão só existe com token do backend: login Google é trocado em signInWithGoogle
+      if (fbUser && !getAuthToken()) {
+        setIsLoadingAuth(false);
+        return;
+      }
+
       if (fbUser) {
         const fbEmail = fbUser.email?.toLowerCase() || '';
         const isMaster = fbEmail === 'iluminatto@gmail.com';
@@ -321,10 +327,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribe();
   }, [usersList]);
 
+  // Google: o Firebase prova a identidade e o backend troca o ID token por uma sessão do LocaDoc
   const signInWithGoogle = async () => {
     try {
-      await signInWithPopup(auth, googleProvider);
+      const credential = await signInWithPopup(auth, googleProvider);
+      const idToken = await credential.user.getIdToken();
+
+      const res = await fetch('/api/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = await res.json().catch(() => null as any);
+
+      if (!res.ok || !data?.success || !data?.token) {
+        await signOut(auth);
+        throw new Error(data?.error || 'Não foi possível autorizar sua conta Google neste sistema.');
+      }
+
+      const authenticated = stripPassword(sanitizeUser(data.user));
+      localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+      localStorage.setItem(AUTH_USER_KEY, JSON.stringify(authenticated));
+      setUser(authenticated);
       setShowAuthModal(false);
+      if (authenticated.role === 'superadmin' || authenticated.role === 'admin') {
+        await refreshUsers();
+      }
     } catch (error: any) {
       console.error('Erro no Google Sign-In:', error);
       throw error;

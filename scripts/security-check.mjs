@@ -241,6 +241,38 @@ let condoToken = '';
     `superadmins=${supers.length}, master=${master?.role}/${master?.status}`);
 }
 
+// 21. Login com Google (verificação do ID token do Firebase no servidor)
+{
+  const semToken = await req('/api/auth/google', { method: 'POST', body: {} });
+  const lixo = await req('/api/auth/google', { method: 'POST', body: { idToken: 'nao.e.um.jwt' } });
+
+  // Assinatura falsa porém com kid real do Google: deve falhar na verificação criptográfica
+  let assinaturaFalsa = 0;
+  try {
+    const certs = await (await fetch('https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com')).json();
+    const kid = Object.keys(certs)[0];
+    const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+    const claims = {
+      aud: 'gen-lang-client-0839703506',
+      iss: 'https://securetoken.google.com/gen-lang-client-0839703506',
+      email: 'iluminatto@gmail.com',
+      email_verified: true,
+      sub: 'fake-uid',
+      iat: Math.floor(Date.now() / 1000) - 10,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    };
+    const forjado = `${b64({ alg: 'RS256', kid, typ: 'JWT' })}.${b64(claims)}.${Buffer.from('assinatura-falsa').toString('base64url')}`;
+    const r = await req('/api/auth/google', { method: 'POST', body: { idToken: forjado } });
+    assinaturaFalsa = r.status;
+  } catch (e) {
+    assinaturaFalsa = -1; // sem rede para buscar os certificados
+  }
+
+  record('Login Google rejeita token ausente/inválido/forjado',
+    semToken.status === 400 && lixo.status === 401 && (assinaturaFalsa === 401 || assinaturaFalsa === -1),
+    `ausente=${semToken.status}, malformado=${lixo.status}, assinaturaFalsa=${assinaturaFalsa}`);
+}
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\nRESULTADO: ${results.length - failed}/${results.length} verificações passaram`);
 process.exit(failed === 0 ? 0 : 1);
