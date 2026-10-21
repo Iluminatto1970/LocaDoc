@@ -94,6 +94,18 @@
           "type": "array",
           "description": "Annex I inventory items list"
         },
+        "textoPersonalizado": {
+          "type": "string",
+          "description": "Custom edited full legal text of the contract"
+        },
+        "usarTextoPersonalizado": {
+          "type": "boolean",
+          "description": "Whether to use the custom edited legal text"
+        },
+        "documentosLocatario": {
+          "type": "array",
+          "description": "List of tenant verification documents uploaded by tenant"
+        },
         "createdAt": {
           "type": "string",
           "description": "Creation ISO date"
@@ -122,6 +134,41 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["id", "userId", "titulo", "endereco", "compostos"]
+    },
+    "Cobranca": {
+      "title": "Cobranca",
+      "description": "Monthly rent billing installment with breakdown, status and payment records",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "contratoId": { "type": "string" },
+        "imovelTitulo": { "type": "string" },
+        "locatarioNome": { "type": "string" },
+        "locatarioEmail": { "type": "string" },
+        "mesReferencia": { "type": "string" },
+        "dataVencimento": { "type": "string" },
+        "valorTotal": { "type": "number" },
+        "status": { "type": "string", "enum": ["pendente", "pago", "atrasado", "cancelado"] },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "contratoId", "locatarioNome", "mesReferencia", "dataVencimento", "valorTotal", "status"]
+    },
+    "Recibo": {
+      "title": "Recibo",
+      "description": "Official rent payment receipt with SHA-256 verification hash and legal quitacao",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "cobrancaId": { "type": "string" },
+        "contratoId": { "type": "string" },
+        "mesReferencia": { "type": "string" },
+        "valorTotalPago": { "type": "number" },
+        "hashAutenticacaoSha256": { "type": "string" },
+        "codigoVerificacao": { "type": "string" },
+        "emitidoEm": { "type": "string" }
+      },
+      "required": ["id", "cobrancaId", "valorTotalPago", "hashAutenticacaoSha256", "codigoVerificacao"]
     }
   },
   "firestore": {
@@ -142,6 +189,18 @@
         "$ref": "#/entities/Contract"
       },
       "description": "Collection of residential lease agreements with ABAC security"
+    },
+    "/cobrancas/{cobrancaId}": {
+      "schema": {
+        "$ref": "#/entities/Cobranca"
+      },
+      "description": "Scheduled monthly rent billing collection"
+    },
+    "/recibos/{reciboId}": {
+      "schema": {
+        "$ref": "#/entities/Recibo"
+      },
+      "description": "Official rent receipts with cryptographic verification"
     }
   }
 }

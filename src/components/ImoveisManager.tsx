@@ -1,17 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { ImovelData, ContractData } from '../types/contract';
+import { ImovelData, ContractData, ContractTemplate } from '../types/contract';
 import { formatCurrencyBRL } from '../utils/defaults';
+import { getSavedTemplates } from '../utils/templates';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
 import { collection, doc, setDoc, deleteDoc, getDocs, query, where } from 'firebase/firestore';
 import { 
   Building2, Plus, Edit2, Trash2, Home, MapPin, DollarSign, 
   FileText, Check, X, Image as ImageIcon, Sparkles, Upload, 
-  Eye, CheckCircle2, Search, ArrowRight, AlertCircle 
+  Eye, CheckCircle2, Search, ArrowRight, AlertCircle, Layers, Handshake, Tag, Bookmark
 } from 'lucide-react';
 
 interface ImoveisManagerProps {
-  onGenerateContractForImovel: (imovel: ImovelData) => void;
+  onGenerateContractForImovel: (imovel: ImovelData, forceOperacao?: any) => void;
+  imoveisList?: ImovelData[];
+  onViewContractRequested?: () => void;
 }
 
 export const DEFAULT_IMOVEIS: ImovelData[] = [
@@ -20,6 +23,7 @@ export const DEFAULT_IMOVEIS: ImovelData[] = [
     userId: 'usr-master-iluminatto',
     titulo: 'Apto 102 - Residencial Jardins',
     tipo: 'apartamento',
+    finalidade: 'aluguel',
     endereco: 'Rua das Flores, 123, Apto 102, Jardim Paulista, São Paulo/SP, CEP: 01400-000',
     bairro: 'Jardim Paulista',
     cidadeUf: 'São Paulo/SP',
@@ -27,11 +31,15 @@ export const DEFAULT_IMOVEIS: ImovelData[] = [
     compostos: '2 dormitórios (1 suíte com armários), sala 2 ambientes integrada à sacada gourmet, cozinha planejada, área de serviço, banheiro social e vaga de garagem nº 24',
     vagaGaragem: 'Vaga nº 24 - 1º Subsolo',
     valorAluguelSugerido: 3500,
+    valorVendaSugerido: 780000,
     condominioSugerido: 650,
     iptuSugerido: 210,
+    matriculaCartorio: '124.580',
+    cartorioNome: '14º Oficial de Registro de Imóveis de SP',
+    modeloContratoPadraoId: 'tpl-locacao-residencial',
     fotos: [],
     observacoes: 'Apartamento mobiliado e decorado de alto padrão. Pintura nova.',
-    status: 'disponivel',
+    status: 'locado',
     createdAt: '2026-01-10T10:00:00.000Z',
     updatedAt: '2026-01-10T10:00:00.000Z',
   },
@@ -40,6 +48,7 @@ export const DEFAULT_IMOVEIS: ImovelData[] = [
     userId: 'usr-master-iluminatto',
     titulo: 'Studio 45 - Moema Smart Living',
     tipo: 'studio',
+    finalidade: 'ambos',
     endereco: 'Av. Ibirapuera, 2450, Studio 45, Moema, São Paulo/SP, CEP: 04028-002',
     bairro: 'Moema',
     cidadeUf: 'São Paulo/SP',
@@ -47,8 +56,12 @@ export const DEFAULT_IMOVEIS: ImovelData[] = [
     compostos: 'Studio integrado com dormitório, bancada de home office, cozinha compacta com eletros embutidos, sacada com fechamento em vidro e 1 vaga de garagem coberta',
     vagaGaragem: 'Vaga nº 08 rotativa',
     valorAluguelSugerido: 2800,
+    valorVendaSugerido: 495000,
     condominioSugerido: 480,
     iptuSugerido: 140,
+    matriculaCartorio: '98.320',
+    cartorioNome: '14º Oficial de Registro de Imóveis de SP',
+    modeloContratoPadraoId: 'tpl-locacao-residencial',
     fotos: [],
     observacoes: 'Totalmente mobiliado, pronto para morar com ar-condicionado e Smart TV.',
     status: 'disponivel',
@@ -59,10 +72,14 @@ export const DEFAULT_IMOVEIS: ImovelData[] = [
 
 export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
   onGenerateContractForImovel,
+  imoveisList,
+  onViewContractRequested,
 }) => {
   const { user } = useAuth();
+  const isTenant = user?.role === 'cliente' || user?.role === 'condomino';
 
   const [imoveis, setImoveis] = useState<ImovelData[]>(() => {
+    if (imoveisList && imoveisList.length > 0) return imoveisList;
     const saved = localStorage.getItem('locadoc_imoveis_db');
     if (saved) {
       try {
@@ -75,6 +92,13 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
     return DEFAULT_IMOVEIS;
   });
 
+  // Keep synced with parent imoveisList if provided
+  useEffect(() => {
+    if (imoveisList) {
+      setImoveis(imoveisList);
+    }
+  }, [imoveisList]);
+
   const [searchTerm, setSearchTerm] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editingImovel, setEditingImovel] = useState<ImovelData | null>(null);
@@ -84,6 +108,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
   // Form states
   const [titulo, setTitulo] = useState('');
   const [tipo, setTipo] = useState<ImovelData['tipo']>('apartamento');
+  const [finalidade, setFinalidade] = useState<ImovelData['finalidade']>('aluguel');
   const [endereco, setEndereco] = useState('');
   const [bairro, setBairro] = useState('');
   const [cidadeUf, setCidadeUf] = useState('São Paulo/SP');
@@ -91,8 +116,14 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
   const [compostos, setCompostos] = useState('');
   const [vagaGaragem, setVagaGaragem] = useState('');
   const [valorAluguelSugerido, setValorAluguelSugerido] = useState<number>(3000);
+  const [valorVendaSugerido, setValorVendaSugerido] = useState<number>(500000);
   const [condominioSugerido, setCondominioSugerido] = useState<number>(500);
   const [iptuSugerido, setIptuSugerido] = useState<number>(150);
+  const [matriculaCartorio, setMatriculaCartorio] = useState('');
+  const [cartorioNome, setCartorioNome] = useState('');
+  const [modeloContratoPadraoId, setModeloContratoPadraoId] = useState('tpl-locacao-residencial');
+  const [minutaPersonalizadaImovel, setMinutaPersonalizadaImovel] = useState('');
+  const [templatesList, setTemplatesList] = useState<ContractTemplate[]>(() => getSavedTemplates());
   const [fotos, setFotos] = useState<string[]>([]);
   const [observacoes, setObservacoes] = useState('');
   const [status, setStatus] = useState<ImovelData['status']>('disponivel');
@@ -127,6 +158,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
     setEditingImovel(null);
     setTitulo('');
     setTipo('apartamento');
+    setFinalidade('aluguel');
     setEndereco('');
     setBairro('');
     setCidadeUf('São Paulo/SP');
@@ -134,8 +166,14 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
     setCompostos('2 cômodos, sala, cozinha, banheiro e vaga de garagem');
     setVagaGaragem('Vaga nº XX');
     setValorAluguelSugerido(3000);
+    setValorVendaSugerido(550000);
     setCondominioSugerido(500);
     setIptuSugerido(150);
+    setMatriculaCartorio('');
+    setCartorioNome('');
+    setModeloContratoPadraoId('tpl-locacao-residencial');
+    setMinutaPersonalizadaImovel('');
+    setTemplatesList(getSavedTemplates());
     setFotos([]);
     setObservacoes('');
     setStatus('disponivel');
@@ -147,6 +185,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
     setEditingImovel(imovel);
     setTitulo(imovel.titulo);
     setTipo(imovel.tipo);
+    setFinalidade(imovel.finalidade || 'aluguel');
     setEndereco(imovel.endereco);
     setBairro(imovel.bairro || '');
     setCidadeUf(imovel.cidadeUf || '');
@@ -154,8 +193,14 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
     setCompostos(imovel.compostos);
     setVagaGaragem(imovel.vagaGaragem || '');
     setValorAluguelSugerido(imovel.valorAluguelSugerido || 0);
+    setValorVendaSugerido(imovel.valorVendaSugerido || 0);
     setCondominioSugerido(imovel.condominioSugerido || 0);
     setIptuSugerido(imovel.iptuSugerido || 0);
+    setMatriculaCartorio(imovel.matriculaCartorio || '');
+    setCartorioNome(imovel.cartorioNome || '');
+    setModeloContratoPadraoId(imovel.modeloContratoPadraoId || 'tpl-locacao-residencial');
+    setMinutaPersonalizadaImovel(imovel.minutaPersonalizadaImovel || '');
+    setTemplatesList(getSavedTemplates());
     setFotos(imovel.fotos || []);
     setObservacoes(imovel.observacoes || '');
     setStatus(imovel.status);
@@ -194,6 +239,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
       userId: user?.id || 'usr-master-iluminatto',
       titulo: titulo.trim(),
       tipo,
+      finalidade,
       endereco: endereco.trim(),
       bairro: bairro.trim(),
       cidadeUf: cidadeUf.trim(),
@@ -201,8 +247,13 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
       compostos: compostos.trim(),
       vagaGaragem: vagaGaragem.trim(),
       valorAluguelSugerido: Number(valorAluguelSugerido) || 0,
+      valorVendaSugerido: Number(valorVendaSugerido) || 0,
       condominioSugerido: Number(condominioSugerido) || 0,
       iptuSugerido: Number(iptuSugerido) || 0,
+      matriculaCartorio: matriculaCartorio.trim(),
+      cartorioNome: cartorioNome.trim(),
+      modeloContratoPadraoId,
+      minutaPersonalizadaImovel: minutaPersonalizadaImovel.trim(),
       fotos,
       observacoes: observacoes.trim(),
       status,
@@ -251,42 +302,85 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
             <Building2 className="w-6 h-6" />
           </div>
           <div>
-            <h2 className="text-base font-bold text-slate-900">
-              Cadastro e Gestão de Imóveis
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-bold text-slate-900">
+                {isTenant ? 'Meu Imóvel Locado' : 'Cadastro e Gestão de Imóveis'}
+              </h2>
+              {isTenant && (
+                <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 rounded-md">
+                  Inquilino Participante
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Cadastre múltiplos imóveis para gerar contratos e laudos de vistoria com 1 clique
+              {isTenant
+                ? 'Informações, vistoria e laudo fotográfico da unidade residencial alugada a você'
+                : 'Cadastre múltiplos imóveis para gerar contratos e laudos de vistoria com 1 clique'}
             </p>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleOpenAddModal}
-          className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
-        >
-          <Plus className="w-4 h-4 text-amber-400" />
-          <span>Cadastrar Novo Imóvel</span>
-        </button>
+        {!isTenant && (
+          <button
+            type="button"
+            onClick={handleOpenAddModal}
+            className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
+          >
+            <Plus className="w-4 h-4 text-amber-400" />
+            <span>Cadastrar Novo Imóvel</span>
+          </button>
+        )}
       </div>
 
-      {/* Search and filters */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
-        <div className="relative w-full sm:w-80">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Buscar por título, endereço ou bairro..."
-            className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none"
-          />
+      {/* Tenant Isolation Banner */}
+      {isTenant && (
+        <div className="bg-slate-900 text-white p-4 rounded-xl flex items-center gap-3 text-xs shadow-xs">
+          <div className="w-8 h-8 rounded-lg bg-amber-400/20 text-amber-400 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-4 h-4" />
+          </div>
+          <div className="space-y-0.5">
+            <p className="font-semibold text-amber-400">Isolamento Estrito de Dados Ativo (LGPD Art. 46)</p>
+            <p className="text-slate-300">
+              Você tem acesso estritamente restrito à sua unidade residencial locada. Imóveis de outros proprietários ou desocupados permanecem isolados na administração.
+            </p>
+          </div>
         </div>
+      )}
 
-        <span className="text-xs text-slate-500">
-          Total de <strong>{filteredImoveis.length}</strong> imóvel(is) cadastrado(s)
-        </span>
-      </div>
+      {/* Search and filters (only for admins or if tenant has multiple rented units) */}
+      {!isTenant && (
+        <div className="bg-white p-4 rounded-xl border border-slate-200 flex items-center justify-between gap-3">
+          <div className="relative w-full sm:w-80">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Buscar por título, endereço ou bairro..."
+              className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none"
+            />
+          </div>
+
+          <span className="text-xs text-slate-500">
+            Total de <strong>{filteredImoveis.length}</strong> imóvel(is) cadastrado(s)
+          </span>
+        </div>
+      )}
+
+      {/* Empty state for tenant */}
+      {filteredImoveis.length === 0 && (
+        <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center space-y-3 max-w-lg mx-auto shadow-xs">
+          <div className="w-12 h-12 bg-slate-100 text-slate-600 rounded-2xl flex items-center justify-center mx-auto">
+            <Home className="w-6 h-6" />
+          </div>
+          <h3 className="text-sm font-bold text-slate-900">Nenhum imóvel vinculado no momento</h3>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            {isTenant
+              ? 'Nenhum imóvel está diretamente vinculado ao seu contrato de inquilino ativo. Caso já tenha um contrato, verifique na aba Meu Contrato ou contate a administração.'
+              : 'Nenhum imóvel encontrado com o termo de busca pesquisado.'}
+          </p>
+        </div>
+      )}
 
       {/* Properties Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -298,7 +392,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
             <div className="space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded bg-slate-100 text-slate-700">
                       {imovel.tipo}
                     </span>
@@ -317,54 +411,83 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
                         ? 'Locado'
                         : 'Em Manutenção'}
                     </span>
+                    <span
+                      className={`px-2 py-0.5 text-[10px] font-bold rounded border ${
+                        imovel.finalidade === 'venda'
+                          ? 'bg-purple-50 text-purple-800 border-purple-200'
+                          : imovel.finalidade === 'ambos'
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : imovel.finalidade === 'temporada'
+                          ? 'bg-amber-50 text-amber-800 border-amber-200'
+                          : 'bg-blue-50 text-blue-800 border-blue-200'
+                      }`}
+                    >
+                      {imovel.finalidade === 'venda'
+                        ? 'Venda'
+                        : imovel.finalidade === 'ambos'
+                        ? 'Locação / Venda'
+                        : imovel.finalidade === 'temporada'
+                        ? 'Temporada'
+                        : 'Locação'}
+                    </span>
                   </div>
-                  <h3 className="text-sm font-bold text-slate-900 mt-1">
+                  <h3 className="text-sm font-bold text-slate-900 mt-1.5">
                     {imovel.titulo}
                   </h3>
+                  <div className="flex items-center gap-1 text-[11px] text-slate-500 mt-0.5">
+                    <Bookmark className="w-3 h-3 text-amber-500 shrink-0" />
+                    <span className="truncate max-w-[240px]">
+                      {imovel.minutaPersonalizadaImovel
+                        ? 'Minuta Exclusiva Deste Imóvel'
+                        : templatesList.find((t) => t.id === imovel.modeloContratoPadraoId)?.titulo || 'Modelo Padrão'}
+                    </span>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEditModal(imovel)}
-                    className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-                    title="Editar Imóvel"
-                  >
-                    <Edit2 className="w-3.5 h-3.5" />
-                  </button>
-
-                  {confirmDeleteId === imovel.id ? (
-                    <div className="flex items-center gap-1 bg-red-50 p-1 rounded-lg border border-red-200">
-                      <span className="text-[10px] text-red-700 font-bold px-1">Excluir?</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleDelete(imovel.id);
-                          setConfirmDeleteId(null);
-                        }}
-                        className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white text-[10px] font-bold rounded cursor-pointer"
-                      >
-                        Sim
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmDeleteId(null)}
-                        className="px-2 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold rounded cursor-pointer"
-                      >
-                        Não
-                      </button>
-                    </div>
-                  ) : (
+                {!isTenant && (
+                  <div className="flex items-center gap-1">
                     <button
                       type="button"
-                      onClick={() => setConfirmDeleteId(imovel.id)}
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
-                      title="Excluir Imóvel"
+                      onClick={() => handleOpenEditModal(imovel)}
+                      className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                      title="Editar Imóvel"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Edit2 className="w-3.5 h-3.5" />
                     </button>
-                  )}
-                </div>
+
+                    {confirmDeleteId === imovel.id ? (
+                      <div className="flex items-center gap-1 bg-red-50 p-1 rounded-lg border border-red-200">
+                        <span className="text-[10px] text-red-700 font-bold px-1">Excluir?</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleDelete(imovel.id);
+                            setConfirmDeleteId(null);
+                          }}
+                          className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-white text-[10px] font-bold rounded cursor-pointer"
+                        >
+                          Sim
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="px-2 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold rounded cursor-pointer"
+                        >
+                          Não
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(imovel.id)}
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                        title="Excluir Imóvel"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Photos preview strip */}
@@ -404,25 +527,78 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
               </div>
 
               {/* Suggested values */}
-              <div className="flex items-center justify-between text-xs pt-1 border-t border-slate-100">
-                <span className="text-slate-500">Aluguel sugerido:</span>
-                <span className="font-bold text-slate-900 text-sm">
-                  {formatCurrencyBRL(imovel.valorAluguelSugerido || 0)}
-                </span>
+              <div className="space-y-1 pt-2 border-t border-slate-100">
+                {(imovel.finalidade === 'aluguel' || imovel.finalidade === 'ambos' || imovel.finalidade === 'temporada' || !imovel.finalidade) && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-500">
+                      {imovel.finalidade === 'temporada' ? 'Diária média:' : 'Aluguel contratual:'}
+                    </span>
+                    <span className="font-bold text-slate-900 text-sm">
+                      {formatCurrencyBRL(imovel.valorAluguelSugerido || 0)}
+                    </span>
+                  </div>
+                )}
+                {(imovel.finalidade === 'venda' || imovel.finalidade === 'ambos') && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-500">Preço de Venda:</span>
+                    <span className="font-bold text-indigo-700 text-sm">
+                      {formatCurrencyBRL(imovel.valorVendaSugerido || 0)}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Quick Action: Gerar Contrato */}
+            {/* Quick Action: Gerar Contrato or Ver Contrato */}
             <div className="pt-4 mt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => onGenerateContractForImovel(imovel)}
-                className="w-full py-2 px-3 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                <span>Gerar Contrato para Este Imóvel</span>
-                <ArrowRight className="w-3.5 h-3.5 ml-auto" />
-              </button>
+              {isTenant ? (
+                <button
+                  type="button"
+                  onClick={onViewContractRequested}
+                  className="w-full py-2 px-3 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Ver Meu Contrato Desta Unidade</span>
+                  <ArrowRight className="w-3.5 h-3.5 ml-auto text-amber-400" />
+                </button>
+              ) : imovel.finalidade === 'ambos' ? (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onGenerateContractForImovel(imovel, 'aluguel_residencial')}
+                    className="py-2 px-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                    title="Emitir Contrato de Locação com Minuta do Imóvel"
+                  >
+                    <FileText className="w-3.5 h-3.5 shrink-0" />
+                    <span>Contrato Locação</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onGenerateContractForImovel(imovel, 'venda_imovel')}
+                    className="py-2 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                    title="Emitir Contrato de Compra e Venda com Minuta do Imóvel"
+                  >
+                    <Handshake className="w-3.5 h-3.5 shrink-0" />
+                    <span>Contrato Venda</span>
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onGenerateContractForImovel(imovel, imovel.finalidade === 'venda' ? 'venda_imovel' : undefined)}
+                  className={`w-full py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer ${
+                    imovel.finalidade === 'venda'
+                      ? 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                      : 'bg-amber-500 hover:bg-amber-600 text-slate-950'
+                  }`}
+                >
+                  {imovel.finalidade === 'venda' ? <Handshake className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
+                  <span>
+                    {imovel.finalidade === 'venda' ? 'Gerar Contrato de Venda' : 'Gerar Contrato para Este Imóvel'}
+                  </span>
+                  <ArrowRight className="w-3.5 h-3.5 ml-auto" />
+                </button>
+              )}
             </div>
           </div>
         ))}
@@ -463,17 +639,17 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="sm:col-span-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-1">
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Título / Identificador do Imóvel *
+                    Título / Identificador *
                   </label>
                   <input
                     type="text"
                     required
                     value={titulo}
                     onChange={(e) => setTitulo(e.target.value)}
-                    placeholder="Ex: Apto 102 - Residencial Jardins"
+                    placeholder="Ex: Apto 102 - Jardins"
                     className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
                   />
                 </div>
@@ -492,6 +668,22 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
                     <option value="studio">Studio</option>
                     <option value="cobertura">Cobertura</option>
                     <option value="outro">Outro</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Finalidade / Operação *
+                  </label>
+                  <select
+                    value={finalidade}
+                    onChange={(e) => setFinalidade(e.target.value as any)}
+                    className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-bold text-indigo-700"
+                  >
+                    <option value="aluguel">Locação Residencial / Comercial</option>
+                    <option value="venda">Venda de Imóvel (Compra e Venda)</option>
+                    <option value="ambos">Ambos (Disponível para Locação ou Venda)</option>
+                    <option value="temporada">Locação por Temporada</option>
                   </select>
                 </div>
               </div>
@@ -603,6 +795,97 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
                     <option value="locado">Locado</option>
                     <option value="manutencao">Em Manutenção</option>
                   </select>
+                </div>
+              </div>
+
+              {/* Se for Venda ou Ambos: dados de venda e matrícula cartorial */}
+              {(finalidade === 'venda' || finalidade === 'ambos') && (
+                <div className="p-4 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-3">
+                  <div className="flex items-center gap-2 text-indigo-900 font-bold text-xs">
+                    <Handshake className="w-4 h-4 text-indigo-600" />
+                    <span>Dados para Compra e Venda / Matrícula no RGI</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Valor de Venda Sugerido (R$) *
+                      </label>
+                      <input
+                        type="number"
+                        value={valorVendaSugerido}
+                        onChange={(e) => setValorVendaSugerido(parseFloat(e.target.value) || 0)}
+                        className="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Matrícula do Imóvel no RGI
+                      </label>
+                      <input
+                        type="text"
+                        value={matriculaCartorio}
+                        onChange={(e) => setMatriculaCartorio(e.target.value)}
+                        placeholder="Ex: Matrícula nº 124.580"
+                        className="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                        Cartório de Registro de Imóveis
+                      </label>
+                      <input
+                        type="text"
+                        value={cartorioNome}
+                        onChange={(e) => setCartorioNome(e.target.value)}
+                        placeholder="Ex: 14º Oficial de Registro de Imóveis"
+                        className="w-full p-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Seção Exclusiva: Cada Imóvel pode ter seu Próprio Contrato */}
+              <div className="p-4 bg-amber-50/60 border border-amber-200 rounded-xl space-y-3">
+                <div className="flex items-center gap-2 text-amber-950 font-bold text-xs">
+                  <Bookmark className="w-4 h-4 text-amber-600" />
+                  <span>Contrato Exclusivo Deste Imóvel (Minuta / Modelo Próprio)</span>
+                </div>
+                <p className="text-[11px] text-slate-600 leading-relaxed">
+                  Cada imóvel pode ter seu próprio modelo ou minuta individual. O sistema preenche automaticamente os dados do locatário/comprador e locador ao gerar o documento.
+                </p>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    Modelo de Contrato Vinculado a Este Imóvel
+                  </label>
+                  <select
+                    value={modeloContratoPadraoId}
+                    onChange={(e) => setModeloContratoPadraoId(e.target.value)}
+                    className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 font-medium"
+                  >
+                    {templatesList.map((tpl) => (
+                      <option key={tpl.id} value={tpl.id}>
+                        {tpl.titulo} ({tpl.categoria.replace('_', ' ')})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                    Minuta / Cláusulas Exclusivas deste Imóvel (Opcional)
+                  </label>
+                  <textarea
+                    rows={4}
+                    value={minutaPersonalizadaImovel}
+                    onChange={(e) => setMinutaPersonalizadaImovel(e.target.value)}
+                    placeholder="Se este imóvel tiver uma minuta exclusiva ou cláusulas particulares (regras específicas de condomínio, mobília tombada, prazos especiais), cole aqui..."
+                    className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900 font-mono leading-relaxed"
+                  />
+                  <span className="text-[10px] text-slate-500">
+                    Suporta variáveis automáticas: {'{{LOCADOR_NOME}}'}, {'{{LOCATARIO_NOME}}'}, {'{{IMOVEL_ENDERECO}}'}, {'{{VALOR_ALUGUEL}}'}, {'{{VALOR_VENDA}}'}, {'{{CHAVE_PIX}}'}.
+                  </span>
                 </div>
               </div>
 

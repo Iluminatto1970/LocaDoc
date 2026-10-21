@@ -117,11 +117,59 @@ export interface InventarioItem {
   fotos?: string[]; // Multiple photos per inventory item
 }
 
+export type ContractOperationType = 'aluguel_residencial' | 'aluguel_comercial' | 'venda_imovel' | 'temporada';
+
+export interface VendaInfo {
+  valorVenda: number;
+  valorVendaExtenso: string;
+  sinalEntrada: number;
+  sinalEntradaExtenso?: string;
+  saldoFinanciamento: number;
+  saldoRestante?: number;
+  condicoesPagamento: string;
+  matriculaImovel: string;
+  cartorioRegistro: string;
+  prazoEscrituraDias?: number;
+  imissaoPosse?: 'na_escritura' | 'no_sinal' | 'na_quitacao';
+  dataPosse?: string;
+}
+
+export interface ContractTemplate {
+  id: string;
+  titulo: string;
+  categoria: 'aluguel_residencial' | 'aluguel_comercial' | 'venda_imovel' | 'temporada' | 'personalizado';
+  descricao: string;
+  conteudoTexto: string;
+  isDefault?: boolean;
+  organizationId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrganizationData {
+  id: string;
+  name: string;
+  slug: string;
+  plan: 'starter' | 'pro' | 'enterprise';
+  maxProperties: number;
+  maxContractsMonth: number;
+  cnpj?: string;
+  creciJuridico?: string;
+  logoUrl?: string;
+  corPrimaria?: string;
+  telefone?: string;
+  email?: string;
+  endereco?: string;
+  createdAt: string;
+}
+
 export interface ImovelData {
   id: string;
   userId: string;
+  organizationId?: string;
   titulo: string;
-  tipo: 'apartamento' | 'casa' | 'studio' | 'cobertura' | 'outro';
+  tipo: 'apartamento' | 'casa' | 'studio' | 'cobertura' | 'comercial' | 'outro';
+  finalidade: 'aluguel' | 'venda' | 'ambos' | 'temporada';
   endereco: string;
   bairro?: string;
   cidadeUf?: string;
@@ -129,11 +177,16 @@ export interface ImovelData {
   compostos: string;
   vagaGaragem?: string;
   valorAluguelSugerido?: number;
+  valorVendaSugerido?: number;
   condominioSugerido?: number;
   iptuSugerido?: number;
+  matriculaCartorio?: string;
+  cartorioNome?: string;
+  modeloContratoPadraoId?: string; // Modelo específico vinculado a este imóvel
+  minutaPersonalizadaImovel?: string; // Cláusulas ou minuta específica exclusiva do imóvel
   fotos?: string[];
   observacoes?: string;
-  status: 'disponivel' | 'locado' | 'manutencao';
+  status: 'disponivel' | 'locado' | 'vendido' | 'manutencao';
   createdAt: string;
   updatedAt: string;
 }
@@ -215,13 +268,34 @@ export interface ReservaTemporada {
   createdAt: string;
 }
 
+export interface TenantUploadedDocument {
+  id: string;
+  nome: string;
+  categoria: 'identidade' | 'renda' | 'residencia' | 'conjuge_fiador' | 'outro';
+  tamanho: number;
+  tipo: string;
+  base64?: string;
+  dataEnvio: string;
+  status: 'em_analise' | 'aprovado' | 'rejeitado';
+  observacoesAdmin?: string;
+}
+
 export interface ContractData {
   id: string;
   userId?: string;
+  tenantId?: string;
+  organizationId?: string;
   imovelId?: string;
+  tipoOperacao?: ContractOperationType;
+  operacao?: ContractOperationType;
   tipoLocacao?: 'residencial_mensal' | 'temporada';
+  templateId?: string;
   temporadaInfo?: TemporadaInfo;
+  vendaInfo?: VendaInfo;
   titulo: string;
+  textoPersonalizado?: string;
+  usarTextoPersonalizado?: boolean;
+  documentosLocatario?: TenantUploadedDocument[];
   createdAt: string;
   updatedAt: string;
   status: 'rascunho' | 'gerado' | 'pronto' | 'ativo';
@@ -247,6 +321,7 @@ export type UserRole = 'superadmin' | 'admin' | 'cliente' | 'condomino';
 
 export interface UserAccount {
   id: string;
+  organizationId?: string;
   name: string;
   email: string;
   role: UserRole;
@@ -254,10 +329,18 @@ export interface UserAccount {
   password?: string;
   creci?: string;
   telefone?: string;
+  whatsapp?: string;
   cpf?: string;
+  rg?: string;
+  orgaoExpedidor?: string;
+  profissao?: string;
+  estadoCivil?: string;
+  rendaMensal?: number;
+  enderecoOrigem?: string;
   unidade?: string; // Ex: 'Apto 142'
   bloco?: string;   // Ex: 'Bloco B'
   condominioNome?: string;
+  documentosEnviados?: TenantUploadedDocument[];
   createdAt?: string;
   createdBy?: string;
   updatedAt?: string;
@@ -277,4 +360,103 @@ export interface UploadedDocFile {
   tag?: 'rg_locador' | 'rg_locatario' | 'comprovante' | 'imovel' | 'laudo' | 'outro';
   targetRole: DocumentTargetRole;
   description?: string;
+}
+
+export type CobrancaStatus = 'pendente' | 'pago' | 'atrasado' | 'cancelado';
+export type FormaPagamento = 'pix' | 'ted' | 'boleto' | 'dinheiro' | 'cartao' | 'outro';
+
+export interface CobrancaMensal {
+  id: string;
+  contratoId: string;
+  imovelId?: string;
+  imovelTitulo: string;
+  imovelEndereco?: string;
+  
+  // Dados do Locatário (Pagador)
+  locatarioNome: string;
+  locatarioEmail: string;
+  locatarioCpf?: string;
+  locatarioTelefone?: string;
+  tenantId?: string; // UID do usuário caso seja usuário cadastrado
+  
+  // Dados do Locador (Beneficiário)
+  locadorNome: string;
+  locadorEmail: string;
+  locadorCpfCnpj?: string;
+  locadorChavePix?: string;
+  
+  // Cronograma e Mês de Referência
+  numeroParcela?: number;
+  totalParcelas?: number;
+  mesReferencia: string; // Ex: 'Maio/2026' ou '2026-05'
+  dataVencimento: string; // YYYY-MM-DD
+  
+  // Discriminação dos valores
+  valorAluguel: number;
+  valorCondominio?: number;
+  valorIptu?: number;
+  outrosEncargos?: number;
+  descricaoEncargos?: string;
+  desconto?: number;
+  valorTotal: number;
+  
+  // Status da Cobrança e Registro de Liquidação
+  status: CobrancaStatus;
+  dataPagamento?: string; // YYYY-MM-DD ou ISO
+  valorPago?: number;
+  formaPagamento?: FormaPagamento;
+  transacaoIdOuComprovante?: string;
+  observacoesPagamento?: string;
+  
+  // Comprovante / Recibo Automático Vinculado
+  reciboEmitido?: boolean;
+  reciboId?: string;
+  reciboHashSha256?: string;
+  
+  // Dados para Pagamento
+  pixCopiaECola?: string;
+  codigoBarrasBoleto?: string;
+
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReciboPagamento {
+  id: string; // Ex: 'REC-2026-0001'
+  cobrancaId: string;
+  contratoId: string;
+  imovelTitulo: string;
+  imovelEndereco: string;
+  
+  // Partes
+  locadorNome: string;
+  locadorCpfCnpj: string;
+  locadorEmail: string;
+  
+  locatarioNome: string;
+  locatarioCpf: string;
+  locatarioEmail: string;
+  
+  // Valores e Competência
+  mesReferencia: string;
+  dataVencimento: string;
+  dataPagamento: string;
+  
+  valorAluguel: number;
+  valorCondominio: number;
+  valorIptu: number;
+  outrosEncargos: number;
+  desconto: number;
+  valorTotalPago: number;
+  valorTotalPagoExtenso: string;
+  
+  formaPagamento: FormaPagamento;
+  transacaoId?: string;
+  
+  // Integridade e Autenticação
+  hashAutenticacaoSha256: string;
+  codigoVerificacao: string;
+  emitidoPor: string;
+  emitidoEm: string;
+  observacoes?: string;
 }

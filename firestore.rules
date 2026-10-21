@@ -72,9 +72,20 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
-    // Properties Collection (Cadastro de Imóveis)
+    // Properties Collection (Cadastro de Imóveis) - Inquilino só visualiza imóvel vinculado a ele
     match /imoveis/{imovelId} {
-      allow get, list: if isSignedIn();
+      allow get: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.userId == request.auth.uid || 
+        (resource.data.keys().hasAll(['tenantId']) && resource.data.tenantId == request.auth.uid) ||
+        (resource.data.keys().hasAll(['tenantEmail']) && resource.data.tenantEmail == request.auth.token.email)
+      );
+      allow list: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.userId == request.auth.uid || 
+        (resource.data.keys().hasAll(['tenantId']) && resource.data.tenantId == request.auth.uid) ||
+        (resource.data.keys().hasAll(['tenantEmail']) && resource.data.tenantEmail == request.auth.token.email)
+      );
       // Apenas administradores podem cadastrar, alterar ou excluir imóveis
       allow create, update, delete: if isAdmin();
     }
@@ -90,11 +101,11 @@ service cloud.firestore {
       
       // Atualização: 
       // - Administrador pode atualizar tudo
-      // - Inquilino pode alterar EXCLUSIVAMENTE seus próprios dados cadastrais (locatario, updatedAt)
+      // - Inquilino pode alterar EXCLUSIVAMENTE seus próprios dados cadastrais e enviar seus documentos (locatario, documentosLocatario, vistoLocatario, updatedAt)
       allow update: if isSignedIn() && (
         isAdmin() ||
         (existing().userId == request.auth.uid) ||
-        (isTenantForContract(existing()) && incoming().diff(existing()).affectedKeys().hasOnly(['locatario', 'updatedAt']))
+        (isTenantForContract(existing()) && incoming().diff(existing()).affectedKeys().hasOnly(['locatario', 'documentosLocatario', 'vistoLocatario', 'updatedAt']))
       );
 
       // Exclusão: NENHUM INQUILINO PODE EXCLUIR. Apenas Administrador.
@@ -129,6 +140,34 @@ service cloud.firestore {
       );
       allow update: if isSignedIn() && (isAdmin() || existing().userId == request.auth.uid);
       allow delete: if isAdmin();
+    }
+
+    // Monthly Rent Billings (Agendamento de Cobranças Mensais)
+    match /cobrancas/{cobrancaId} {
+      allow get: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.locatarioEmail == request.auth.token.email || 
+        (resource.data.keys().hasAll(['tenantId']) && resource.data.tenantId == request.auth.uid)
+      );
+      allow list: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.locatarioEmail == request.auth.token.email || 
+        (resource.data.keys().hasAll(['tenantId']) && resource.data.tenantId == request.auth.uid)
+      );
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Official Rent Receipts (Comprovantes & Recibos de Quitação com Hash SHA-256)
+    match /recibos/{reciboId} {
+      allow get: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.locatarioEmail == request.auth.token.email
+      );
+      allow list: if isSignedIn() && (
+        isAdmin() || 
+        resource.data.locatarioEmail == request.auth.token.email
+      );
+      allow create, update, delete: if isAdmin();
     }
 
     // Health check / connection test document

@@ -13,9 +13,12 @@ import { ImoveisManager, DEFAULT_IMOVEIS } from './components/ImoveisManager';
 import { TemporadaManager, DEFAULT_TEMPORADA_IMOVEIS } from './components/TemporadaManager';
 import { UserManager } from './components/UserManager';
 import { ApiGeminiManager } from './components/ApiGeminiManager';
+import { SaasManager } from './components/SaasManager';
+import { CobrancasManager } from './components/CobrancasManager';
 import { DashboardOverview } from './components/DashboardOverview';
-import { ContractData, InventarioItem, ImovelData, ImovelTemporadaData } from './types/contract';
+import { ContractData, InventarioItem, ImovelData, ImovelTemporadaData, ContractOperationType } from './types/contract';
 import { getSampleContract, getEmptyContract, numeroPorExtensoReais } from './utils/defaults';
+import { getSavedTemplates, interpolateTemplate } from './utils/templates';
 import { db } from './lib/firebase';
 import { doc, getDoc, setDoc, deleteDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { CheckCircle2, Lock, Shield } from 'lucide-react';
@@ -396,14 +399,26 @@ function MainApp() {
     await persistToFirestore(copy);
   };
 
-  // Generate contract directly from registered property
-  const handleGenerateContractForImovel = async (imovel: ImovelData) => {
+  // Generate contract directly from registered property (per-property contract and template)
+  const handleGenerateContractForImovel = async (imovel: ImovelData, forceOperacao?: ContractOperationType) => {
     const base = getEmptyContract();
-    const newContract: ContractData = {
+    const isVenda = forceOperacao === 'venda_imovel' || (!forceOperacao && imovel.finalidade === 'venda');
+    const operacao: ContractOperationType = isVenda 
+      ? 'venda_imovel' 
+      : imovel.finalidade === 'temporada' 
+      ? 'temporada' 
+      : 'aluguel_residencial';
+
+    const valorVenda = imovel.valorVendaSugerido || 500000;
+    const valorAluguel = imovel.valorAluguelSugerido || 3000;
+    const sinalEntrada = Math.round(valorVenda * 0.2);
+
+    let initialContract: ContractData = {
       ...base,
       id: `contrato-${Date.now()}`,
       imovelId: imovel.id,
-      titulo: `Contrato - ${imovel.titulo}`,
+      operacao,
+      titulo: isVenda ? `Contrato de Compra e Venda - ${imovel.titulo}` : `Contrato de Locação - ${imovel.titulo}`,
       userId: user?.id || 'usr-master-iluminatto',
       objeto: {
         endereco: imovel.endereco,
@@ -411,24 +426,63 @@ function MainApp() {
       },
       valores: {
         ...base.valores,
-        aluguel: imovel.valorAluguelSugerido || 3000,
-        aluguelExtenso: numeroPorExtensoReais(imovel.valorAluguelSugerido || 3000),
+        aluguel: valorAluguel,
+        aluguelExtenso: numeroPorExtensoReais(valorAluguel),
       },
       garantia: {
         ...base.garantia,
-        caucaoValor: (imovel.valorAluguelSugerido || 3000) * 3,
-        caucaoValorExtenso: numeroPorExtensoReais((imovel.valorAluguelSugerido || 3000) * 3),
+        caucaoValor: valorAluguel * 3,
+        caucaoValorExtenso: numeroPorExtensoReais(valorAluguel * 3),
       },
+      vendaInfo: isVenda ? {
+        valorVenda,
+        valorVendaExtenso: numeroPorExtensoReais(valorVenda),
+        sinalEntrada,
+        sinalEntradaExtenso: numeroPorExtensoReais(sinalEntrada),
+        saldoFinanciamento: valorVenda - sinalEntrada,
+        saldoRestante: valorVenda - sinalEntrada,
+        condicoesPagamento: 'Sinal de 20% pago na assinatura do compromisso e saldo financiado pelo SFH ou quitado na escritura definitiva.',
+        matriculaImovel: imovel.matriculaCartorio || '',
+        cartorioRegistro: imovel.cartorioNome || 'Ofício de Registro de Imóveis Competente',
+        dataPosse: 'Imissão de posse definitiva após a quitação integral do saldo do preço.',
+      } : undefined,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       status: 'rascunho',
     };
 
-    setContracts((prev) => [newContract, ...prev]);
-    setActiveContractId(newContract.id);
+    // Obter modelo exclusivo deste imóvel ou minuta personalizada própria do imóvel
+    const templates = getSavedTemplates();
+    let templateTextToUse = '';
+    
+    if (imovel.minutaPersonalizadaImovel && imovel.minutaPersonalizadaImovel.trim().length > 20) {
+      // O imóvel possui seu próprio texto/minuta exclusivo!
+      templateTextToUse = imovel.minutaPersonalizadaImovel;
+    } else if (imovel.modeloContratoPadraoId) {
+      const found = templates.find((t) => t.id === imovel.modeloContratoPadraoId);
+      if (found) {
+        templateTextToUse = found.conteudoTexto;
+      }
+    }
+
+    if (!templateTextToUse) {
+      // Fallback para template de venda ou residencial
+      const defaultId = isVenda ? 'tpl-compra-venda' : 'tpl-locacao-residencial';
+      const foundDef = templates.find((t) => t.id === defaultId) || templates[0];
+      if (foundDef) templateTextToUse = foundDef.conteudoTexto;
+    }
+
+    if (templateTextToUse) {
+      const filledText = interpolateTemplate(templateTextToUse, initialContract);
+      initialContract.textoPersonalizado = filledText;
+      initialContract.usarTextoPersonalizado = true;
+    }
+
+    setContracts((prev) => [initialContract, ...prev]);
+    setActiveContractId(initialContract.id);
     setActiveTab('editor');
-    showToast(`Contrato criado para ${imovel.titulo}! Revise os dados das partes.`);
-    await persistToFirestore(newContract);
+    showToast(`Contrato com minuta própria gerado para "${imovel.titulo}"!`);
+    await persistToFirestore(initialContract);
   };
 
   const handleContractGeneratedFromTemporada = async (shortTermContract: ContractData) => {
@@ -473,7 +527,7 @@ function MainApp() {
       <AuthModal />
 
       {/* Main Content Area */}
-      <main className="flex-1 py-6 sm:py-8 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full">
+      <main className="flex-1 py-6 sm:py-8 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto w-full pb-20 md:pb-8">
         {/* Toast feedback */}
         {toastMessage && (
           <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-lg border border-slate-700 flex items-center gap-2.5 text-xs animate-in slide-in-from-bottom-3 no-print">
@@ -507,7 +561,19 @@ function MainApp() {
 
         {activeTab === 'imoveis' && (
           <ImoveisManager
+            imoveisList={visibleImoveis}
             onGenerateContractForImovel={handleGenerateContractForImovel}
+            onViewContractRequested={() => setActiveTab('visualizador')}
+          />
+        )}
+
+        {activeTab === 'cobrancas' && (
+          <CobrancasManager
+            contracts={visibleContracts}
+            onOpenContract={(contractId) => {
+              setActiveContractId(contractId);
+              setActiveTab('visualizador');
+            }}
           />
         )}
 
@@ -577,6 +643,10 @@ function MainApp() {
 
         {activeTab === 'usuarios' && (
           <UserManager />
+        )}
+
+        {activeTab === 'saas' && (
+          <SaasManager />
         )}
 
         {activeTab === 'api_gemini' && (

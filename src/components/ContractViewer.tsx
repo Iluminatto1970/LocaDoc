@@ -44,6 +44,9 @@ export const ContractViewer: React.FC<ContractViewerProps> = ({
 
   // Render text for full clipboard copy
   const generateRawContractText = (): string => {
+    if (contract.usarTextoPersonalizado && contract.textoPersonalizado) {
+      return contract.textoPersonalizado;
+    }
     let garantiaText = '';
     if (guaranteeViewMode === 'all_options') {
       garantiaText = `Atenção: Mantenha apenas a opção de garantia acordada entre as partes.
@@ -489,8 +492,31 @@ Visto do(a) Locatário(a): ___________________________
         
         {/* Main Contract Section */}
         <div className={printScope === 'anexo_only' ? 'print:hidden space-y-6' : 'space-y-6'}>
-          {/* Document Title Header */}
-          <div className="text-center pb-6 border-b border-slate-300">
+          {contract.usarTextoPersonalizado && contract.textoPersonalizado ? (
+            <div className="space-y-5">
+              <div className="no-print p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-950 font-sans shadow-2xs">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                  <span className="font-bold">Minuta de Contrato Personalizada:</span>
+                  <span>Exibindo a versão editada no processador de texto (salva no banco de dados).</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={onEditRequested}
+                  className="px-3 py-1 bg-amber-200 hover:bg-amber-300 rounded-lg font-bold transition-colors cursor-pointer"
+                >
+                  Editar no Processador
+                </button>
+              </div>
+
+              <div className="whitespace-pre-wrap font-serif text-[13.5px] leading-relaxed text-slate-900 print:text-black">
+                {contract.textoPersonalizado}
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Document Title Header */}
+              <div className="text-center pb-6 border-b border-slate-300">
             {contract.tipoLocacao === 'temporada' && (
               <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-100 text-amber-900 rounded-lg text-xs font-bold uppercase tracking-wider mb-2">
                 <Palmtree className="w-3.5 h-3.5 text-amber-600" />
@@ -870,6 +896,8 @@ Visto do(a) Locatário(a): ___________________________
             </div>
           </div>
         </div>
+        </>
+        )}
         {/* End of Main Contract Section */}
       </div>
 

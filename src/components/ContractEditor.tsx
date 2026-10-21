@@ -1,13 +1,15 @@
-import React, { useState, useRef } from 'react';
-import { apiFetch } from '../lib/api';
-import { ContractData, GarantiaData, UploadedDocFile } from '../types/contract';
-import { numeroPorExtensoReais, calculateSHA256 } from '../utils/defaults';
+import React, { useState, useRef, useEffect } from 'react';
+import { ContractData, GarantiaData, UploadedDocFile, TenantUploadedDocument, ContractTemplate, ContractOperationType, VendaInfo } from '../types/contract';
+import { numeroPorExtensoReais, calculateSHA256, generateContractFullText, formatCurrencyBRL } from '../utils/defaults';
+import { getSavedTemplates, saveContractTemplate, interpolateTemplate, DEFAULT_TEMPLATES } from '../utils/templates';
 import { useAuth } from '../context/AuthContext';
 import { 
   Save, Eye, User, Home, Calendar, DollarSign, Shield, 
   Scale, Users, CheckCircle2, RefreshCw, Lock, AlertTriangle, ShieldCheck,
   ScanText, Upload, Building2, Camera, Image as ImageIcon, Sparkles, Plus, 
-  Trash2, KeyRound, ExternalLink, FileCheck, Check, AlertCircle, X, Download, Settings
+  Trash2, KeyRound, ExternalLink, FileCheck, Check, AlertCircle, X, Download, Settings,
+  FileText, Edit3, Paperclip, FileUp, Bold, Italic, Underline, List, FileCode, CheckCircle, XCircle,
+  Layers, BookmarkPlus, Copy, ArrowRightLeft, FileCheck2, Tag, Handshake, ShoppingCart
 } from 'lucide-react';
 import { OcrInspectorModal } from './OcrInspectorModal';
 
@@ -29,6 +31,19 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
 
   const [formData, setFormData] = useState<ContractData>({ 
     ...contract,
+    tipoOperacao: contract.tipoOperacao || (contract.tipoLocacao === 'temporada' ? 'temporada' : 'aluguel_residencial'),
+    vendaInfo: contract.vendaInfo || {
+      valorVenda: 450000,
+      valorVendaExtenso: 'quatrocentos e cinquenta mil reais',
+      sinalEntrada: 90000,
+      sinalEntradaExtenso: 'noventa mil reais',
+      saldoFinanciamento: 360000,
+      condicoesPagamento: 'Sinal de R$ 90.000,00 mediante PIX no ato deste instrumento e saldo devedor de R$ 360.000,00 via financiamento bancário habitacional.',
+      matriculaImovel: '124.580',
+      cartorioRegistro: '14º Oficial de Registro de Imóveis de São Paulo/SP',
+      prazoEscrituraDias: 60,
+      imissaoPosse: 'na_quitacao',
+    },
     vistoriaDigital: {
       ...contract.vistoriaDigital,
       fotos: contract.vistoriaDigital?.fotos || [],
@@ -39,11 +54,39 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
     }
   });
   const [activeSection, setActiveSection] = useState<
-    'partes' | 'objeto' | 'prazo' | 'valores' | 'vistoria' | 'garantia' | 'foro'
+    'partes' | 'objeto' | 'prazo' | 'valores' | 'vistoria' | 'garantia' | 'foro' | 'venda'
   >('partes');
   const [savedFeedback, setSavedFeedback] = useState(false);
   const [tenantWarning, setTenantWarning] = useState<string | null>(null);
   const [editorOcrFile, setEditorOcrFile] = useState<UploadedDocFile | null>(null);
+
+  // Mode switcher for ContractEditor: includes dedicated template manager & quick injection
+  const [editorMode, setEditorMode] = useState<'formulario' | 'texto_livre' | 'modelos_template' | 'documentos_inquilino'>('formulario');
+
+  // Templates state
+  const [templatesList, setTemplatesList] = useState<ContractTemplate[]>(() => getSavedTemplates());
+  const [selectedTemplateCategory, setSelectedTemplateCategory] = useState<string>('todos');
+  const [pastedRawText, setPastedRawText] = useState('');
+  const [newTemplateTitle, setNewTemplateTitle] = useState('');
+  const [newTemplateCategory, setNewTemplateCategory] = useState<ContractTemplate['categoria']>('personalizado');
+  const [newTemplateDesc, setNewTemplateDesc] = useState('');
+  const [templateNotice, setTemplateNotice] = useState<string | null>(null);
+  const [previewTemplateModal, setPreviewTemplateModal] = useState<ContractTemplate | null>(null);
+
+  // Text editor custom text state ("espécie de editor de texto")
+  const [customContractText, setCustomContractText] = useState<string>(() => {
+    return formData.textoPersonalizado || generateContractFullText(formData);
+  });
+  const [useCustomText, setUseCustomText] = useState<boolean>(formData.usarTextoPersonalizado || false);
+
+  // Tenant document upload & verification state
+  const [tenantDocs, setTenantDocs] = useState<TenantUploadedDocument[]>(formData.documentosLocatario || []);
+  const [selectedDocCategory, setSelectedDocCategory] = useState<TenantUploadedDocument['categoria']>('identidade');
+  const [isUploadingTenantDoc, setIsUploadingTenantDoc] = useState(false);
+  const [selectedDocPreview, setSelectedDocPreview] = useState<TenantUploadedDocument | null>(null);
+  const [docFeedbackMsg, setDocFeedbackMsg] = useState<string | null>(null);
+  const tenantDocFileInputRef = useRef<HTMLInputElement>(null);
+  const contractTextAreaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-extraction states
   const [isExtractingDoc, setIsExtractingDoc] = useState(false);
@@ -78,7 +121,7 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
       });
       const base64 = await base64Promise;
 
-      const res = await apiFetch('/api/ocr-extract-single', {
+      const res = await fetch('/api/ocr-extract-single', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -152,7 +195,7 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
         });
       }
 
-      const res = await apiFetch('/api/extract-documents', {
+      const res = await fetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -414,20 +457,217 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
     }));
   };
 
+  // Helper to insert snippet/tag at cursor in contract text area
+  const insertTextAtCursor = (textToInsert: string) => {
+    const el = contractTextAreaRef.current;
+    if (!el) {
+      setCustomContractText((prev) => prev + textToInsert);
+      return;
+    }
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const current = customContractText;
+    const next = current.substring(0, start) + textToInsert + current.substring(end);
+    setCustomContractText(next);
+    setTimeout(() => {
+      el.focus();
+      el.setSelectionRange(start + textToInsert.length, start + textToInsert.length);
+    }, 50);
+  };
+
+  const insertFormat = (prefix: string, suffix: string) => {
+    const el = contractTextAreaRef.current;
+    if (!el) return;
+    const start = el.selectionStart;
+    const end = el.selectionEnd;
+    const selected = customContractText.substring(start, end) || 'texto';
+    const replacement = `${prefix}${selected}${suffix}`;
+    insertTextAtCursor(replacement);
+  };
+
+  const handleResetToDefaultText = () => {
+    if (window.confirm('Deseja realmente restaurar a redação oficial padrão baseada nos dados do formulário? Quaisquer alterações manuais de texto serão sobrescritas.')) {
+      const standard = generateContractFullText(formData);
+      setCustomContractText(standard);
+      setUseCustomText(true);
+    }
+  };
+
+  const handleInsertClause = (clauseType: 'pet' | 'garagem' | 'silencio' | 'pintura' | 'solar' | 'airbnb' | 'reforma') => {
+    let snippet = '';
+    switch (clauseType) {
+      case 'pet':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DOS ANIMAIS DE ESTIMAÇÃO (PETS):
+Fica autorizada a permanência no imóvel de até 2 (dois) animais domésticos (cães/gatos) de porte pequeno a médio, desde que dóceis e com carteira de vacinação em dia. O(A) LOCATÁRIO(A) responsabiliza-se integralmente por eventuais danos causados pelo animal a pisos, rodapés, portas, telas ou mobília, bem como pelo estrito cumprimento das normas sanitárias e de sossego condominiais.`;
+        break;
+      case 'garagem':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DA VAGA DE GARAGEM:
+A locação compreende o uso exclusivo da vaga de garagem determinada no objeto deste contrato, sendo expressamente vedado utilizá-la para depósito de materiais inflamáveis, entulhos ou descarte de objetos, devendo ser observadas as regras de manobra e demarcação do condomínio.`;
+        break;
+      case 'silencio':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DAS NORMAS CONDOMINIAIS E HORÁRIO DE SILÊNCIO:
+O(A) LOCATÁRIO(A) compromete-se a respeitar rigorosamente as disposições da Convenção e do Regimento Interno do condomínio, em especial os horários de silêncio (das 22:00h às 08:00h), sob pena de arcar com as penalidades e multas aplicadas pela Administração do Condomínio.`;
+        break;
+      case 'pintura':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DA PINTURA E RESTITUIÇÃO DO IMÓVEL:
+O imóvel é entregue com pintura nova em látex fosco acrílico cor branca. Ao término da locação, o(a) LOCATÁRIO(A) obriga-se a restituí-lo nas mesmíssimas condições e padrão de acabamento, devendo providenciar repintura idêntica com materiais de primeira qualidade ou indenizar o custo orçado.`;
+        break;
+      case 'solar':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DO RATEIO E ENERGIA SOLAR (FOTOVOLTAICA):
+Havendo geração de energia solar associada à unidade, os créditos energéticos auferidos serão abatidos da conta de consumo mensal, correndo por conta do(a) LOCATÁRIO(A) a taxa básica de disponibilidade e o rateio acordado de compensação.`;
+        break;
+      case 'airbnb':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DA VEDAÇÃO A SUBLOCAÇÃO E HOSPEDAGEM (AIRBNB):
+É terminantemente proibida a cessão, empréstimo, sublocação total ou parcial, bem como a exploração do imóvel em plataformas digitais de hospedagem por temporada (como Airbnb, Booking ou similares), constituindo grave infração contratual que enseja rescisão imediata e incidência da multa da Cláusula 9ª.`;
+        break;
+      case 'reforma':
+        snippet = `\n\nCLÁUSULA ADICIONAL - DAS OBRAS, REFORMAS E BENFEITORIAS:
+É vedada qualquer obra, demolição de paredes ou alteração estrutural no imóvel sem expressa autorização por escrito do(a) LOCADOR(A). Benfeitorias voluptuárias não serão indenizáveis e incorporar-se-ão ao imóvel caso não possam ser removidas sem prejuízo da integridade do bem.`;
+        break;
+    }
+    insertTextAtCursor(snippet);
+  };
+
+  // Tenant document upload handling
+  const handleUploadTenantFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    setIsUploadingTenantDoc(true);
+    setDocFeedbackMsg(null);
+
+    try {
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+      });
+      reader.readAsDataURL(file);
+      const base64 = await base64Promise;
+
+      const newDoc: TenantUploadedDocument = {
+        id: `tdoc-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        nome: file.name,
+        categoria: selectedDocCategory,
+        tamanho: file.size,
+        tipo: file.type || 'application/octet-stream',
+        base64,
+        dataEnvio: new Date().toISOString(),
+        status: 'em_analise',
+      };
+
+      const updatedList = [newDoc, ...tenantDocs];
+      setTenantDocs(updatedList);
+      setFormData((prev) => ({ ...prev, documentosLocatario: updatedList }));
+      setDocFeedbackMsg(`Documento "${file.name}" anexado com sucesso! Clique em salvar para sincronizar com o banco de dados.`);
+      if (tenantDocFileInputRef.current) tenantDocFileInputRef.current.value = '';
+    } catch (err) {
+      console.error(err);
+      setDocFeedbackMsg('Erro ao processar o arquivo. Tente novamente.');
+    } finally {
+      setIsUploadingTenantDoc(false);
+    }
+  };
+
+  const handleRemoveTenantDoc = (docId: string) => {
+    const updated = tenantDocs.filter((d) => d.id !== docId);
+    setTenantDocs(updated);
+    setFormData((prev) => ({ ...prev, documentosLocatario: updated }));
+  };
+
+  const handleApproveRejectDoc = (docId: string, status: 'aprovado' | 'rejeitado') => {
+    const updated = tenantDocs.map((d) => d.id === docId ? { ...d, status } : d);
+    setTenantDocs(updated);
+    setFormData((prev) => ({ ...prev, documentosLocatario: updated }));
+  };
+
   const handleSave = () => {
     if (isTenant) {
-      // Inquilino can only save their own personal data
+      // Inquilino can only save their own personal data and uploaded documents
       const safeContract: ContractData = {
         ...contract,
         locatario: { ...formData.locatario },
+        documentosLocatario: tenantDocs,
         vistoLocatario: formData.locatario.nome || contract.vistoLocatario,
+        updatedAt: new Date().toISOString(),
       };
       onSave(safeContract);
     } else {
-      onSave(formData);
+      const updated: ContractData = {
+        ...formData,
+        textoPersonalizado: customContractText,
+        usarTextoPersonalizado: useCustomText,
+        documentosLocatario: tenantDocs,
+        updatedAt: new Date().toISOString(),
+      };
+      onSave(updated);
     }
     setSavedFeedback(true);
     setTimeout(() => setSavedFeedback(false), 2500);
+  };
+
+  // Apply a template and automatically inject landlord, tenant, property, and terms
+  const handleApplyTemplate = (tpl: ContractTemplate) => {
+    const interpolated = interpolateTemplate(tpl.conteudoTexto, formData);
+    setCustomContractText(interpolated);
+    setUseCustomText(true);
+    setFormData((prev) => ({
+      ...prev,
+      templateId: tpl.id,
+      textoPersonalizado: interpolated,
+      usarTextoPersonalizado: true,
+      tipoOperacao: tpl.categoria === 'personalizado' ? prev.tipoOperacao : (tpl.categoria as ContractOperationType),
+    }));
+    setTemplateNotice(`Modelo "${tpl.titulo}" aplicado com sucesso! Todos os dados de locatário, locador e imóvel foram injetados automaticamente.`);
+    setEditorMode('texto_livre');
+    setTimeout(() => setTemplateNotice(null), 5000);
+  };
+
+  // Inject landlord, tenant, and property data into raw external text
+  const handleInjectDataIntoRawText = () => {
+    if (!pastedRawText.trim()) {
+      setTemplateNotice('Cole primeiro o texto da nova minuta de contrato no campo correspondente.');
+      setTimeout(() => setTemplateNotice(null), 4000);
+      return;
+    }
+    const interpolated = interpolateTemplate(pastedRawText, formData);
+    setCustomContractText(interpolated);
+    setUseCustomText(true);
+    setFormData((prev) => ({
+      ...prev,
+      textoPersonalizado: interpolated,
+      usarTextoPersonalizado: true,
+    }));
+    setTemplateNotice('Texto externo importado e dados das partes injetados com sucesso! Redirecionado para o processador de texto.');
+    setPastedRawText('');
+    setEditorMode('texto_livre');
+    setTimeout(() => setTemplateNotice(null), 5000);
+  };
+
+  // Save current edited text as a new template in the system (reusable across all properties)
+  const handleSaveCurrentAsTemplate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTemplateTitle.trim()) {
+      setTemplateNotice('Digite o título para o novo modelo de contrato.');
+      setTimeout(() => setTemplateNotice(null), 4000);
+      return;
+    }
+
+    const newTpl: ContractTemplate = {
+      id: `tpl-${Date.now()}`,
+      titulo: newTemplateTitle.trim(),
+      categoria: newTemplateCategory,
+      descricao: newTemplateDesc.trim() || 'Modelo personalizado criado a partir de contrato editado no sistema.',
+      conteudoTexto: customContractText,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await saveContractTemplate(newTpl);
+    setTemplatesList(getSavedTemplates());
+    setNewTemplateTitle('');
+    setNewTemplateDesc('');
+    setTemplateNotice(`Modelo "${newTpl.titulo}" salvo com sucesso no banco de dados e pronto para reuso em qualquer imóvel!`);
+    setTimeout(() => setTemplateNotice(null), 5000);
   };
 
   const handleTabClick = (section: typeof activeSection) => {
@@ -493,6 +733,117 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
         </div>
       </div>
 
+      {/* 3-Mode Switcher */}
+      <div className="bg-white p-2.5 rounded-2xl border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setEditorMode('formulario')}
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer ${
+              editorMode === 'formulario'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <FileText className="w-4 h-4 text-amber-400" />
+            <span>{isTenant ? '1. Dados Cadastrais' : 'Formulário Estruturado'}</span>
+          </button>
+
+          {!isTenant && (
+            <button
+              type="button"
+              onClick={() => {
+                if (!customContractText) {
+                  setCustomContractText(generateContractFullText(formData));
+                }
+                setEditorMode('texto_livre');
+              }}
+              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer ${
+                editorMode === 'texto_livre'
+                  ? 'bg-amber-500 text-slate-950 shadow-xs'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-amber-50 border border-amber-200/60'
+              }`}
+            >
+              <Edit3 className="w-4 h-4" />
+              <span>Editor de Texto do Contrato</span>
+              <span className="px-1.5 py-0.2 text-[9px] bg-slate-900 text-amber-300 rounded font-black tracking-wide uppercase">
+                Minuta
+              </span>
+            </button>
+          )}
+
+          {!isTenant && (
+            <button
+              type="button"
+              onClick={() => {
+                setTemplatesList(getSavedTemplates());
+                setEditorMode('modelos_template');
+              }}
+              className={`px-3.5 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer ${
+                editorMode === 'modelos_template'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100 border border-slate-200'
+              }`}
+            >
+              <Layers className="w-4 h-4 text-amber-400" />
+              <span>Modelos & Troca de Contrato</span>
+              <span className="px-1.5 py-0.2 text-[9px] bg-amber-100 text-amber-900 rounded font-bold uppercase">
+                Templates
+              </span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => setEditorMode('documentos_inquilino')}
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl transition-all flex items-center gap-2 cursor-pointer ${
+              editorMode === 'documentos_inquilino'
+                ? 'bg-slate-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Paperclip className="w-4 h-4 text-amber-400" />
+            <span>{isTenant ? '2. Enviar Meus Documentos' : 'Documentos do Inquilino'}</span>
+            {tenantDocs.length > 0 && (
+              <span className="px-1.5 py-0.2 text-[10px] bg-amber-400 text-slate-950 rounded-full font-extrabold">
+                {tenantDocs.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {editorMode === 'texto_livre' && (
+          <div className="flex items-center gap-2 text-xs">
+            <label className="flex items-center gap-2 cursor-pointer bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-lg font-semibold text-amber-950">
+              <input
+                type="checkbox"
+                checked={useCustomText}
+                onChange={(e) => setUseCustomText(e.target.checked)}
+                className="rounded text-amber-600"
+              />
+              <span>Ativar texto editado no contrato final e PDF</span>
+            </label>
+          </div>
+        )}
+      </div>
+
+      {/* Template Notice Feedback */}
+      {templateNotice && (
+        <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-950 rounded-2xl flex items-center justify-between text-xs font-bold animate-in fade-in shadow-xs">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{templateNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTemplateNotice(null)}
+            className="text-emerald-700 hover:text-emerald-900"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Tenant LGPD Warning / Notice */}
       {isTenant && (
         <div className="bg-amber-50/90 border border-amber-200/90 p-4 rounded-2xl flex items-start gap-3 shadow-2xs">
@@ -517,7 +868,7 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
       )}
 
       {/* Principal: Importação de Documentos com Auto-Preenchimento por IA (Locador e Locatário) */}
-      {!isTenant && (
+      {!isTenant && editorMode === 'formulario' && (
         <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-indigo-950 text-white p-5 sm:p-6 rounded-2xl shadow-md border border-slate-700/60 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/80 pb-3">
             <div className="flex items-center gap-2.5">
@@ -693,8 +1044,64 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
         </div>
       )}
 
-      {/* Section navigation tabs */}
-      <div className="flex items-center gap-1 overflow-x-auto p-1.5 bg-slate-100 rounded-xl border border-slate-200/80">
+      {/* Selector de Modalidade do Negócio Imobiliário */}
+      {!isTenant && editorMode === 'formulario' && (
+        <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold text-slate-700">Modalidade:</span>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {[
+                { id: 'aluguel_residencial', label: '🏠 Aluguel Residencial' },
+                { id: 'venda_imovel', label: '🤝 Compra e Venda' },
+                { id: 'aluguel_comercial', label: '🏢 Comercial' },
+                { id: 'temporada', label: '🌴 Temporada (Diárias)' },
+              ].map((op) => (
+                <button
+                  key={op.id}
+                  type="button"
+                  onClick={() => {
+                    const nextOp = op.id as ContractOperationType;
+                    setFormData((prev) => ({
+                      ...prev,
+                      tipoOperacao: nextOp,
+                      tipoLocacao: nextOp === 'temporada' ? 'temporada' : 'residencial_mensal',
+                    }));
+                    if (nextOp === 'venda_imovel') {
+                      setActiveSection('venda');
+                    }
+                  }}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer ${
+                    formData.tipoOperacao === op.id
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {op.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setTemplatesList(getSavedTemplates());
+                setEditorMode('modelos_template');
+              }}
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5 text-amber-600" />
+              <span>Trocar Modelo</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Section navigation tabs (Formulário) */}
+      {editorMode === 'formulario' && (
+        <>
+          <div className="flex items-center gap-1 overflow-x-auto p-1.5 bg-slate-100 rounded-xl border border-slate-200/80">
         <button
           type="button"
           onClick={() => handleTabClick('partes')}
@@ -767,6 +1174,19 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
           {isTenant ? <Lock className="w-3 h-3 text-slate-400" /> : <Scale className="w-3.5 h-3.5" />}
           <span>6. Garantia</span>
         </button>
+
+        {formData.tipoOperacao === 'venda_imovel' && (
+          <button
+            type="button"
+            onClick={() => handleTabClick('venda')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap flex items-center gap-1.5 ${
+              isTenant ? 'opacity-50 cursor-not-allowed text-slate-400' : 'text-slate-600 hover:text-slate-900'
+            } ${activeSection === 'venda' ? 'bg-emerald-600 text-white shadow-2xs font-bold' : 'text-emerald-800 bg-emerald-50'}`}
+          >
+            <Handshake className="w-3.5 h-3.5" />
+            <span>7. Compra e Venda (RGI & Sinal)</span>
+          </button>
+        )}
 
         <button
           type="button"
@@ -2206,7 +2626,1141 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
           </div>
         )}
 
+        {/* Section: Compra e Venda de Imóvel */}
+        {activeSection === 'venda' && (
+          <div className="space-y-6 animate-in fade-in">
+            <div className="border-b border-slate-200 pb-2">
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+                <Handshake className="w-4 h-4 text-emerald-600" />
+                <span>Condições da Compra e Venda (Código Civil Brasileiro)</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Valores de venda, sinal (arras), financiamento habitacional, certidões e registro imobiliário.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Valor Total da Venda (R$)
+                </label>
+                <input
+                  type="number"
+                  value={formData.vendaInfo?.valorVenda || ''}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    handleUpdate((p) => ({
+                      ...p,
+                      vendaInfo: {
+                        ...(p.vendaInfo || {
+                          sinalEntrada: 0,
+                          saldoFinanciamento: 0,
+                          condicoesPagamento: '',
+                          matriculaImovel: '',
+                          cartorioRegistro: '',
+                        }),
+                        valorVenda: val,
+                        valorVendaExtenso: numeroPorExtensoReais(val),
+                      },
+                    }));
+                  }}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-900 font-bold"
+                  placeholder="Ex: 500000"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Sinal e Princípio de Pagamento / Arras (R$)
+                </label>
+                <input
+                  type="number"
+                  value={formData.vendaInfo?.sinalEntrada || ''}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    handleUpdate((p) => ({
+                      ...p,
+                      vendaInfo: {
+                        ...(p.vendaInfo || {
+                          valorVenda: 0,
+                          valorVendaExtenso: '',
+                          saldoFinanciamento: 0,
+                          condicoesPagamento: '',
+                          matriculaImovel: '',
+                          cartorioRegistro: '',
+                        }),
+                        sinalEntrada: val,
+                        sinalEntradaExtenso: numeroPorExtensoReais(val),
+                      },
+                    }));
+                  }}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
+                  placeholder="Ex: 100000"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Saldo Restante / Financiamento Bancário (R$)
+                </label>
+                <input
+                  type="number"
+                  value={formData.vendaInfo?.saldoFinanciamento || ''}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    handleUpdate((p) => ({
+                      ...p,
+                      vendaInfo: {
+                        ...(p.vendaInfo || {
+                          valorVenda: 0,
+                          valorVendaExtenso: '',
+                          sinalEntrada: 0,
+                          condicoesPagamento: '',
+                          matriculaImovel: '',
+                          cartorioRegistro: '',
+                        }),
+                        saldoFinanciamento: val,
+                      },
+                    }));
+                  }}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
+                  placeholder="Ex: 400000"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Matrícula Imobiliária nº (RGI)
+                </label>
+                <input
+                  type="text"
+                  value={formData.vendaInfo?.matriculaImovel || ''}
+                  onChange={(e) => handleUpdate((p) => ({
+                    ...p,
+                    vendaInfo: {
+                      ...(p.vendaInfo || {
+                        valorVenda: 0,
+                        valorVendaExtenso: '',
+                        sinalEntrada: 0,
+                        saldoFinanciamento: 0,
+                        condicoesPagamento: '',
+                        cartorioRegistro: '',
+                      }),
+                      matriculaImovel: e.target.value,
+                    },
+                  }))}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
+                  placeholder="Ex: 125.430"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Ofício de Registro de Imóveis (Cartório Competente)
+                </label>
+                <input
+                  type="text"
+                  value={formData.vendaInfo?.cartorioRegistro || ''}
+                  onChange={(e) => handleUpdate((p) => ({
+                    ...p,
+                    vendaInfo: {
+                      ...(p.vendaInfo || {
+                        valorVenda: 0,
+                        valorVendaExtenso: '',
+                        sinalEntrada: 0,
+                        saldoFinanciamento: 0,
+                        condicoesPagamento: '',
+                        matriculaImovel: '',
+                      }),
+                      cartorioRegistro: e.target.value,
+                    },
+                  }))}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
+                  placeholder="Ex: 14º Oficial de Registro de Imóveis da Capital de São Paulo/SP"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Condições de Pagamento e Prazos Convencionados
+                </label>
+                <textarea
+                  rows={3}
+                  value={formData.vendaInfo?.condicoesPagamento || ''}
+                  onChange={(e) => handleUpdate((p) => ({
+                    ...p,
+                    vendaInfo: {
+                      ...(p.vendaInfo || {
+                        valorVenda: 0,
+                        valorVendaExtenso: '',
+                        sinalEntrada: 0,
+                        saldoFinanciamento: 0,
+                        matriculaImovel: '',
+                        cartorioRegistro: '',
+                      }),
+                      condicoesPagamento: e.target.value,
+                    },
+                  }))}
+                  className="w-full p-2.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
+                  placeholder="Descreva o cronograma de desembolso, entrada, liberação de FGTS/financiamento e posse..."
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
+      </>
+      )}
+
+      {/* 2. MODE: TEXT EDITOR ("uma espécie de editor de texto") */}
+      {editorMode === 'texto_livre' && !isTenant && (
+        <div className="space-y-4 animate-in fade-in">
+          {/* Text Editor Toolbar Card */}
+          <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Edit3 className="w-4 h-4 text-amber-500" />
+                  <span>Editor de Texto da Minuta Contratual</span>
+                  <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase rounded bg-amber-100 text-amber-900">
+                    Processador Jurídico
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Altere livremente a redação de qualquer cláusula, insira termos especiais ou formate as condições da locação ou venda.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setEditorMode('modelos_template')}
+                  className="px-3 py-1.5 text-xs font-bold text-slate-800 bg-amber-100 hover:bg-amber-200 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer border border-amber-300/80"
+                  title="Trocar modelo de contrato ou importar texto externo com injeção automática de dados"
+                >
+                  <Layers className="w-3.5 h-3.5 text-amber-700" />
+                  <span>Trocar Modelo / Importar</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleResetToDefaultText}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Regera o texto oficial com base nos campos preenchidos no formulário"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Restaurar Texto Padrão</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  className="px-4 py-1.5 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-500 rounded-lg flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Salvar Texto Editado</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick formatting toolbar */}
+            <div className="flex flex-wrap items-center gap-2 p-2 bg-slate-50 rounded-xl border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider px-1">
+                Formatação:
+              </span>
+              <button
+                type="button"
+                onClick={() => insertFormat('**', '**')}
+                className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs font-bold cursor-pointer"
+                title="Negrito"
+              >
+                <Bold className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => insertFormat('*', '*')}
+                className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs italic cursor-pointer"
+                title="Itálico"
+              >
+                <Italic className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => insertFormat('<u>', '</u>')}
+                className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs underline cursor-pointer"
+                title="Sublinhado"
+              >
+                <Underline className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => insertTextAtCursor('\n\nCLÁUSULA NOVA - DA DISPOSIÇÃO ESPECIAL:\n[Descreva aqui o termo ou obrigação acordada...]')}
+                className="px-2 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs font-bold flex items-center gap-1 cursor-pointer"
+              >
+                <span>+ Cláusula</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => insertTextAtCursor('\nParágrafo 1º: [Descreva o detalhe...]')}
+                className="px-2 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs font-medium cursor-pointer"
+              >
+                <span>+ Parágrafo</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => insertTextAtCursor('\n- Item 1\n- Item 2\n- Item 3')}
+                className="p-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs cursor-pointer"
+                title="Lista com marcadores"
+              >
+                <List className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => insertTextAtCursor('\n\n------------------------------------------------------------\n\n')}
+                className="px-2 py-1 bg-white hover:bg-slate-100 border border-slate-200 rounded text-slate-800 text-xs font-mono cursor-pointer"
+                title="Linha divisória"
+              >
+                <span>---</span>
+              </button>
+            </div>
+
+            {/* Quick Clause Snippets Insert Bar */}
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-bold text-slate-600 block">
+                Modelos de Cláusulas Adicionais Rápidas (1 Clique para Inserir):
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('pet')}
+                  className="px-2.5 py-1 text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🐾 Animais (Pets)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('garagem')}
+                  className="px-2.5 py-1 text-xs bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🚗 Vaga de Garagem</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('silencio')}
+                  className="px-2.5 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🔇 Lei do Silêncio</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('pintura')}
+                  className="px-2.5 py-1 text-xs bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🎨 Pintura Nova</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('airbnb')}
+                  className="px-2.5 py-1 text-xs bg-rose-50 hover:bg-rose-100 text-rose-900 border border-rose-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🚫 Proibição Airbnb</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('solar')}
+                  className="px-2.5 py-1 text-xs bg-yellow-50 hover:bg-yellow-100 text-yellow-900 border border-yellow-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>⚡ Energia Solar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInsertClause('reforma')}
+                  className="px-2.5 py-1 text-xs bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 rounded-lg font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  <span>🛠️ Obras e Reformas</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Dynamic Variable Tags */}
+            <div className="space-y-1.5 pt-1 border-t border-slate-100">
+              <span className="text-[11px] font-bold text-slate-600 block">
+                Inserir Variáveis Dinâmicas do Contrato:
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.locatario.nome || '{{locatario.nome}}')}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                  title="Inserir nome do locatário"
+                >
+                  [Nome Inquilino]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formatCurrencyBRL(formData.valores.aluguel))}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                  title="Inserir valor do aluguel"
+                >
+                  [Valor Aluguel]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.objeto.endereco)}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                  title="Inserir endereço do imóvel"
+                >
+                  [Endereço Imóvel]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(`dia ${formData.valores.diaVencimento} de cada mês`)}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                >
+                  [Dia Vencimento]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.valores.chavePix)}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                >
+                  [Chave PIX]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.vistoriaDigital.hashSha256)}
+                  className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-mono border border-slate-200 cursor-pointer"
+                >
+                  [Hash SHA-256]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formatCurrencyBRL(formData.vendaInfo?.valorVenda || 0))}
+                  className="px-2 py-0.5 text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded font-mono border border-emerald-200 cursor-pointer font-bold"
+                  title="Inserir valor total de venda"
+                >
+                  [Valor Venda]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formatCurrencyBRL(formData.vendaInfo?.sinalEntrada || 0))}
+                  className="px-2 py-0.5 text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded font-mono border border-emerald-200 cursor-pointer font-bold"
+                  title="Inserir sinal de entrada / arras"
+                >
+                  [Sinal / Arras]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formatCurrencyBRL(formData.vendaInfo?.saldoFinanciamento || 0))}
+                  className="px-2 py-0.5 text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded font-mono border border-emerald-200 cursor-pointer"
+                  title="Inserir saldo financiamento"
+                >
+                  [Saldo Financiamento]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.vendaInfo?.matriculaImovel || '000.000')}
+                  className="px-2 py-0.5 text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded font-mono border border-emerald-200 cursor-pointer"
+                  title="Inserir matrícula do imóvel"
+                >
+                  [Matrícula RGI]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => insertTextAtCursor(formData.vendaInfo?.cartorioRegistro || 'Cartório de Imóveis')}
+                  className="px-2 py-0.5 text-[11px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 rounded font-mono border border-emerald-200 cursor-pointer"
+                  title="Inserir cartório de registro"
+                >
+                  [Cartório]
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Textarea Document Paper Area */}
+          <div className="bg-white rounded-2xl border border-slate-300 shadow-sm overflow-hidden p-6 sm:p-8 space-y-3">
+            <div className="flex items-center justify-between text-xs text-slate-500 border-b border-slate-100 pb-2">
+              <span className="font-semibold text-slate-700">Folha de Redação Contratual</span>
+              <span>
+                {customContractText.split(/\s+/).filter(Boolean).length} palavras | {customContractText.length} caracteres
+              </span>
+            </div>
+
+            <textarea
+              ref={contractTextAreaRef}
+              value={customContractText}
+              onChange={(e) => {
+                setCustomContractText(e.target.value);
+                setUseCustomText(true);
+              }}
+              rows={28}
+              className="w-full p-4 text-xs sm:text-sm font-serif leading-relaxed text-slate-900 bg-slate-50/50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500 focus:bg-white resize-y shadow-inner"
+              placeholder="Digite ou edite os termos do contrato aqui..."
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-200">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                <span className="text-xs text-slate-600 font-medium">
+                  {useCustomText ? 'Modo de Texto Personalizado ATIVO no contrato oficial' : 'Texto salvo em rascunho'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditorMode('modelos_template')}
+                  className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <BookmarkPlus className="w-3.5 h-3.5 text-amber-600" />
+                  <span>Salvar como Novo Modelo</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSave();
+                    onPreviewRequested();
+                  }}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>Salvar e Visualizar Minuta</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. MODE: TEMPLATE MANAGEMENT & QUICK INJECTION ("opção de envio de novos modelos de contrato, ou mesmo apos envio dos dados ter opção de enviar novo texto de contrato que o sistema so adiciona os dados do locatario e locador em questão, ou escolhe o tipo de contrato") */}
+      {editorMode === 'modelos_template' && !isTenant && (
+        <div className="space-y-6 animate-in fade-in">
+          {/* Top Banner */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center shrink-0">
+                <Layers className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Biblioteca de Modelos & Injeção de Minutas
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
+                  Mesmo após o preenchimento ou envio dos dados, você pode escolher outro modelo ou colar qualquer texto de contrato externo. O sistema injeta automaticamente todas as qualificações do locatário/comprador e locador/vendedor.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!customContractText) {
+                  setCustomContractText(generateContractFullText(formData));
+                }
+                setEditorMode('texto_livre');
+              }}
+              className="px-4 py-2 bg-amber-400 hover:bg-amber-500 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Abrir no Processador de Texto</span>
+            </button>
+          </div>
+
+          {/* Quick Option 1: Paste any external raw contract text */}
+          <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+              <ArrowRightLeft className="w-5 h-5 text-indigo-600" />
+              <div>
+                <h4 className="text-sm font-bold text-slate-900">
+                  Colar Novo Texto de Contrato Bruto (Injeção Automática)
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Tem uma minuta personalizada em Word ou cartório? Cole abaixo para o sistema injetar instantaneamente os dados do locatário e locador já preenchidos.
+                </p>
+              </div>
+            </div>
+
+            <textarea
+              value={pastedRawText}
+              onChange={(e) => setPastedRawText(e.target.value)}
+              rows={6}
+              className="w-full p-3.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-amber-500 focus:bg-white text-slate-900 leading-relaxed shadow-inner"
+              placeholder="Cole aqui o texto do novo contrato... Use tags dinâmicas como {{LOCADOR_NOME}}, {{LOCATARIO_NOME}}, {{IMOVEL_ENDERECO}}, {{VALOR_ALUGUEL}}, {{VALOR_VENDA}}, {{CHAVE_PIX}} etc."
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+              <span className="text-[11px] text-slate-500">
+                Variáveis suportadas: <code>{'{{LOCADOR_NOME}}'}</code>, <code>{'{{LOCATARIO_NOME}}'}</code>, <code>{'{{VALOR_ALUGUEL}}'}</code>, <code>{'{{VALOR_VENDA}}'}</code>, <code>{'{{IMOVEL_ENDERECO}}'}</code>.
+              </span>
+              <button
+                type="button"
+                onClick={handleInjectDataIntoRawText}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-amber-300" />
+                <span>Injetar Dados Atuais & Ir para Editor</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Option 2: Pre-defined & Custom Templates Library */}
+          <div className="bg-white p-5 sm:p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <BookmarkPlus className="w-4 h-4 text-amber-500" />
+                  <span>Modelos de Contrato no Sistema</span>
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Selecione o modelo desejado para aplicar à locação ou venda deste imóvel:
+                </p>
+              </div>
+
+              {/* Filter Tabs */}
+              <div className="flex items-center gap-1 flex-wrap">
+                {[
+                  { id: 'todos', label: 'Todos' },
+                  { id: 'aluguel_residencial', label: 'Residencial' },
+                  { id: 'venda_imovel', label: 'Compra e Venda' },
+                  { id: 'aluguel_comercial', label: 'Comercial' },
+                  { id: 'temporada', label: 'Temporada' },
+                  { id: 'personalizado', label: 'Personalizados' },
+                ].map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => setSelectedTemplateCategory(f.id)}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+                      selectedTemplateCategory === f.id
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Template Cards Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {templatesList
+                .filter((t) => selectedTemplateCategory === 'todos' || t.categoria === selectedTemplateCategory)
+                .map((tpl) => (
+                  <div
+                    key={tpl.id}
+                    className="p-4 rounded-xl border border-slate-200 hover:border-slate-300 bg-slate-50/50 hover:bg-slate-50 transition-all flex flex-col justify-between space-y-3"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded-md ${
+                          tpl.categoria === 'venda_imovel'
+                            ? 'bg-emerald-100 text-emerald-900'
+                            : tpl.categoria === 'temporada'
+                            ? 'bg-amber-100 text-amber-900'
+                            : tpl.categoria === 'aluguel_comercial'
+                            ? 'bg-blue-100 text-blue-900'
+                            : 'bg-slate-200 text-slate-800'
+                        }`}>
+                          {tpl.categoria.replace('_', ' ')}
+                        </span>
+                        {tpl.isDefault && (
+                          <span className="text-[10px] text-slate-400 font-semibold">Oficial do Sistema</span>
+                        )}
+                      </div>
+                      <h5 className="text-xs font-bold text-slate-900">{tpl.titulo}</h5>
+                      <p className="text-[11px] text-slate-500 leading-relaxed line-clamp-2">
+                        {tpl.descricao}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-2 border-t border-slate-200/60">
+                      <button
+                        type="button"
+                        onClick={() => handleApplyTemplate(tpl)}
+                        className="flex-1 py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Aplicar Modelo & Injetar Dados</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewTemplateModal(tpl)}
+                        className="py-1.5 px-2.5 bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                        title="Ver esqueleto do modelo com tags dinâmicas"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          {/* Quick Option 3: Save Current Contract as a New Reusable Template */}
+          <form onSubmit={handleSaveCurrentAsTemplate} className="bg-slate-900 text-white p-5 sm:p-6 rounded-2xl shadow-md space-y-4 border border-slate-700">
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+              <BookmarkPlus className="w-5 h-5 text-amber-400" />
+              <div>
+                <h4 className="text-sm font-bold text-white">
+                  Salvar a Minuta Deste Contrato como Novo Modelo do Sistema
+                </h4>
+                <p className="text-xs text-slate-400">
+                  Gostou da redação que acabou de formatar? Salve-a no catálogo para aplicar com 1 clique a qualquer outro imóvel ou cliente no futuro.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="sm:col-span-2 space-y-1">
+                <label className="text-[11px] font-bold text-slate-300">Título do Novo Modelo</label>
+                <input
+                  type="text"
+                  value={newTemplateTitle}
+                  onChange={(e) => setNewTemplateTitle(e.target.value)}
+                  placeholder="Ex: Minuta Padrão Imóveis Luxo com Vistoria 48h"
+                  className="w-full p-2 text-xs bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-amber-400"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-bold text-slate-300">Categoria</label>
+                <select
+                  value={newTemplateCategory}
+                  onChange={(e) => setNewTemplateCategory(e.target.value as any)}
+                  className="w-full p-2 text-xs bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-amber-400"
+                >
+                  <option value="aluguel_residencial">Locação Residencial</option>
+                  <option value="venda_imovel">Compra e Venda</option>
+                  <option value="aluguel_comercial">Locação Comercial</option>
+                  <option value="temporada">Temporada / Diárias</option>
+                  <option value="personalizado">Personalizado</option>
+                </select>
+              </div>
+
+              <div className="sm:col-span-3 space-y-1">
+                <label className="text-[11px] font-bold text-slate-300">Descrição ou Observações do Modelo</label>
+                <input
+                  type="text"
+                  value={newTemplateDesc}
+                  onChange={(e) => setNewTemplateDesc(e.target.value)}
+                  placeholder="Ex: Utilizado para apartamentos com caução de 3 meses e vistoria pericial..."
+                  className="w-full p-2 text-xs bg-slate-800 border border-slate-700 rounded-lg text-white focus:outline-none focus:ring-1 focus:ring-amber-400"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="submit"
+                className="px-4 py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Save className="w-4 h-4" />
+                <span>Salvar Minuta como Novo Modelo</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 3. MODE: TENANT DOCUMENTS & PROFILE ("o inquilino tambem pode enviar seus dados e arquivos de informações") */}
+      {editorMode === 'documentos_inquilino' && (
+        <div className="space-y-6 animate-in fade-in">
+          {/* Header Card */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center shrink-0">
+                <Paperclip className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  {isTenant ? 'Envio de Dados & Documentos do Inquilino' : 'Documentos Comprobatórios do Inquilino'}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {isTenant
+                    ? 'Envie suas informações cadastrais e fotos/PDFs de documentos para validação da administração (LGPD Art. 18)'
+                    : 'Confira, aprove ou solicite reenvio de documentos pessoais e comprovantes enviados pelo locatário'}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSave}
+              className="px-4 py-2 text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-xl transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
+            >
+              <Save className="w-3.5 h-3.5 text-amber-400" />
+              <span>Salvar Dados e Documentos</span>
+            </button>
+          </div>
+
+          {/* Feedback message */}
+          {docFeedbackMsg && (
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>{docFeedbackMsg}</span>
+            </div>
+          )}
+
+          {/* Inquilino Personal Data Form (for tenant or admin editing tenant) */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-2">
+              <User className="w-4 h-4 text-amber-500" />
+              <span>Qualificação Civil do(a) Locatário(a) (Inquilino)</span>
+            </h4>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Nome Completo *</label>
+                <input
+                  type="text"
+                  value={formData.locatario.nome}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, nome: e.target.value } }))}
+                  placeholder="Nome completo do inquilino"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">CPF/MF *</label>
+                <input
+                  type="text"
+                  value={formData.locatario.cpf}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, cpf: e.target.value } }))}
+                  placeholder="000.000.000-00"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">RG / Órgão Emissor</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    value={formData.locatario.rg}
+                    onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, rg: e.target.value } }))}
+                    placeholder="Número RG"
+                    className="col-span-2 p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900"
+                  />
+                  <input
+                    type="text"
+                    value={formData.locatario.orgaoExpedidor}
+                    onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, orgaoExpedidor: e.target.value } }))}
+                    placeholder="SSP/SP"
+                    className="p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">E-mail *</label>
+                <input
+                  type="email"
+                  value={formData.locatario.email}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, email: e.target.value } }))}
+                  placeholder="email@exemplo.com.br"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Telefone / WhatsApp *</label>
+                <input
+                  type="text"
+                  value={formData.locatario.telefone}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, telefone: e.target.value } }))}
+                  placeholder="(11) 98765-4321"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Profissão</label>
+                <input
+                  type="text"
+                  value={formData.locatario.profissao}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, profissao: e.target.value } }))}
+                  placeholder="Ex: Engenheiro(a) de Software"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Estado Civil</label>
+                <input
+                  type="text"
+                  value={formData.locatario.estadoCivil}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, estadoCivil: e.target.value } }))}
+                  placeholder="Solteiro(a), Casado(a)..."
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+
+              <div className="md:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Endereço Residencial de Origem</label>
+                <input
+                  type="text"
+                  value={formData.locatario.endereco || ''}
+                  onChange={(e) => handleUpdate((p) => ({ ...p, locatario: { ...p.locatario, endereco: e.target.value } }))}
+                  placeholder="Rua, número, complemento, bairro, cidade/UF, CEP"
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Document Upload Area */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+              <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Upload className="w-4 h-4 text-amber-500" />
+                <span>Anexar Novo Arquivo / Documento de Comprovação</span>
+              </h4>
+              <span className="text-xs text-slate-500">
+                Formatos aceitos: PDF, PNG, JPG ou JPEG (até 15MB)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Categoria do Documento *
+                </label>
+                <select
+                  value={selectedDocCategory}
+                  onChange={(e) => setSelectedDocCategory(e.target.value as any)}
+                  className="w-full p-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg text-slate-900 font-medium"
+                >
+                  <option value="identidade">🪪 Documento de Identificação (RG / CNH)</option>
+                  <option value="renda">💵 Comprovante de Renda (Holerite / Extrato)</option>
+                  <option value="residencia">🏠 Comprovante de Residência Atual</option>
+                  <option value="conjuge_fiador">💍 Documentos de Cônjuge ou Fiador</option>
+                  <option value="outro">📁 Outros Documentos / Comprovantes</option>
+                </select>
+              </div>
+
+              <div className="md:col-span-2">
+                <input
+                  ref={tenantDocFileInputRef}
+                  type="file"
+                  onChange={handleUploadTenantFile}
+                  accept="image/*,.pdf"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => tenantDocFileInputRef.current?.click()}
+                  disabled={isUploadingTenantDoc}
+                  className="w-full py-3 px-4 border-2 border-dashed border-amber-300 hover:border-amber-500 bg-amber-50/50 hover:bg-amber-50 rounded-xl text-xs font-semibold text-amber-950 flex items-center justify-center gap-2 transition-all cursor-pointer"
+                >
+                  <FileUp className="w-4 h-4 text-amber-600" />
+                  <span>
+                    {isUploadingTenantDoc
+                      ? 'Processando arquivo...'
+                      : 'Selecionar Arquivo no Dispositivo (Clique para Escolher)'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* List of Uploaded Documents */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 uppercase tracking-wide">
+                Documentos Anexados ao Contrato ({tenantDocs.length})
+              </span>
+              <span className="text-xs text-slate-500">
+                Armazenamento Seguro em Nuvem (Google Cloud Firestore)
+              </span>
+            </div>
+
+            {tenantDocs.length === 0 ? (
+              <div className="p-8 text-center space-y-2">
+                <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                  <Paperclip className="w-5 h-5" />
+                </div>
+                <p className="text-xs font-bold text-slate-700">Nenhum documento anexado ainda</p>
+                <p className="text-xs text-slate-500">
+                  {isTenant
+                    ? 'Envie sua CNH/RG e comprovante de renda utilizando o seletor acima.'
+                    : 'O inquilino ainda não enviou os documentos comprobatórios.'}
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {tenantDocs.map((d) => (
+                  <div key={d.id} className="p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:bg-slate-50/70 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+                        {d.tipo.includes('pdf') ? (
+                          <FileText className="w-5 h-5 text-red-600" />
+                        ) : d.tipo.includes('image') ? (
+                          <ImageIcon className="w-5 h-5 text-blue-600" />
+                        ) : (
+                          <Paperclip className="w-5 h-5 text-slate-600" />
+                        )}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h5 className="text-xs font-bold text-slate-900 truncate max-w-xs sm:max-w-md">
+                            {d.nome}
+                          </h5>
+                          <span className={`px-2 py-0.5 text-[10px] font-bold rounded-md ${
+                            d.status === 'aprovado'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : d.status === 'rejeitado'
+                              ? 'bg-rose-100 text-rose-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}>
+                            {d.status === 'aprovado'
+                              ? 'Aprovado'
+                              : d.status === 'rejeitado'
+                              ? 'Rejeitado'
+                              : 'Em Análise'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
+                          <span className="capitalize font-medium">
+                            {d.categoria === 'identidade'
+                              ? 'Documento com Foto (RG/CNH)'
+                              : d.categoria === 'renda'
+                              ? 'Comprovante de Renda'
+                              : d.categoria === 'residencia'
+                              ? 'Comprovante de Residência'
+                              : d.categoria === 'conjuge_fiador'
+                              ? 'Cônjuge / Fiador'
+                              : 'Outro'}
+                          </span>
+                          <span>•</span>
+                          <span>{(d.tamanho / 1024).toFixed(1)} KB</span>
+                          <span>•</span>
+                          <span>{new Date(d.dataEnvio).toLocaleDateString('pt-BR')}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 self-end sm:self-center">
+                      {d.base64 && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDocPreview(d)}
+                          className="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Visualizar</span>
+                        </button>
+                      )}
+
+                      {d.base64 && (
+                        <a
+                          href={d.base64}
+                          download={d.nome}
+                          className="px-2.5 py-1 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Baixar</span>
+                        </a>
+                      )}
+
+                      {!isTenant && (
+                        <div className="flex items-center gap-1 border-l border-slate-200 pl-2 ml-1">
+                          <button
+                            type="button"
+                            onClick={() => handleApproveRejectDoc(d.id, 'aprovado')}
+                            className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-lg cursor-pointer"
+                            title="Aprovar Documento"
+                          >
+                            <CheckCircle className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleApproveRejectDoc(d.id, 'rejeitado')}
+                            className="p-1.5 text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer"
+                            title="Rejeitar Documento"
+                          >
+                            <XCircle className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTenantDoc(d.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"
+                        title="Excluir Arquivo"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Document Lightbox Preview Modal */}
+      {selectedDocPreview && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in"
+          onClick={() => setSelectedDocPreview(null)}
+        >
+          <div
+            className="relative bg-white rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <span className="text-xs font-bold text-slate-900 flex items-center gap-2">
+                <Paperclip className="w-4 h-4 text-amber-500" />
+                <span>{selectedDocPreview.nome}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedDocPreview(null)}
+                className="p-1 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-200 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 flex-1 overflow-auto flex items-center justify-center bg-slate-950/5 min-h-[300px]">
+              {selectedDocPreview.tipo.includes('image') && selectedDocPreview.base64 ? (
+                <img
+                  src={selectedDocPreview.base64}
+                  alt={selectedDocPreview.nome}
+                  className="max-h-[70vh] w-auto max-w-full object-contain rounded-lg shadow-sm"
+                />
+              ) : selectedDocPreview.tipo.includes('pdf') && selectedDocPreview.base64 ? (
+                <iframe
+                  src={selectedDocPreview.base64}
+                  title={selectedDocPreview.nome}
+                  className="w-full h-[65vh] rounded-lg border border-slate-200"
+                />
+              ) : (
+                <div className="text-center space-y-2 p-8">
+                  <FileText className="w-12 h-12 text-slate-400 mx-auto" />
+                  <p className="text-xs font-bold text-slate-700">{selectedDocPreview.nome}</p>
+                  <p className="text-xs text-slate-500">Visualização integrada não suportada para este formato.</p>
+                </div>
+              )}
+            </div>
+            <div className="p-3 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500 bg-white">
+              <span>{(selectedDocPreview.tamanho / 1024).toFixed(1)} KB • {selectedDocPreview.categoria}</span>
+              {selectedDocPreview.base64 && (
+                <a
+                  href={selectedDocPreview.base64}
+                  download={selectedDocPreview.nome}
+                  className="px-3 py-1.5 bg-slate-900 text-white rounded-lg font-semibold hover:bg-slate-800 flex items-center gap-1.5 cursor-pointer text-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Baixar Arquivo Original</span>
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* OCR Inspector Modal for Quick Document Scanning */}
       <OcrInspectorModal
@@ -2256,6 +3810,55 @@ export const ContractEditor: React.FC<ContractEditorProps> = ({
                 <Download className="w-3.5 h-3.5" />
                 <span>Baixar Foto</span>
               </a>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Template Preview Modal */}
+      {previewTemplateModal && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setPreviewTemplateModal(null)}
+        >
+          <div 
+            className="relative bg-white rounded-2xl max-w-3xl w-full max-h-[85vh] overflow-hidden shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2">
+                <BookmarkPlus className="w-4 h-4 text-amber-500" />
+                <h4 className="text-sm font-bold text-slate-900">{previewTemplateModal.titulo}</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewTemplateModal(null)}
+                className="p-1 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-200 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 flex-1 overflow-auto bg-slate-50/50 space-y-2">
+              <p className="text-xs text-slate-600 italic">{previewTemplateModal.descricao}</p>
+              <pre className="p-4 bg-white border border-slate-200 rounded-xl text-xs font-mono text-slate-800 whitespace-pre-wrap leading-relaxed">
+                {previewTemplateModal.conteudoTexto}
+              </pre>
+            </div>
+            <div className="p-3.5 border-t border-slate-200 flex items-center justify-between bg-white">
+              <span className="text-xs text-slate-500">
+                Ao aplicar, todas as tags como {'{{LOCADOR_NOME}}'} serão substituídas pelos dados reais deste contrato.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  handleApplyTemplate(previewTemplateModal);
+                  setPreviewTemplateModal(null);
+                }}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-amber-400" />
+                <span>Aplicar este Modelo Agora</span>
+              </button>
             </div>
           </div>
         </div>

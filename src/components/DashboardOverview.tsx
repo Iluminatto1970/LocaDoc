@@ -5,7 +5,7 @@ import {
   Building2, FileText, DollarSign, TrendingUp, Users, 
   Palmtree, ShieldCheck, CheckCircle2, Clock, PlusCircle, 
   ArrowUpRight, ArrowRight, ExternalLink, Sparkles, AlertCircle,
-  BarChart3, PieChart as PieChartIcon, Activity, Settings
+  BarChart3, PieChart as PieChartIcon, Activity, Settings, CreditCard
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -259,6 +259,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
             <button
               type="button"
+              onClick={() => onNavigateToTab('cobrancas')}
+              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <CreditCard className="w-4 h-4 text-emerald-200" />
+              <span>Cobranças & Recibos</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => onNavigateToTab('temporada')}
               className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs rounded-xl border border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
             >
@@ -300,13 +309,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         </div>
 
         {/* KPI 2: Total Accumulated Rent */}
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-3 hover:border-slate-300 transition-colors">
+        <div 
+          onClick={() => onNavigateToTab('cobrancas')}
+          className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-3 hover:border-emerald-300 transition-all cursor-pointer group"
+          title="Clique para abrir Agendamento de Cobranças & Recibos"
+        >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider group-hover:text-emerald-700 transition-colors">
               Total de Aluguéis
             </span>
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-700 flex items-center justify-center font-bold">
-              <DollarSign className="w-4 h-4 text-emerald-600" />
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-700 flex items-center justify-center font-bold group-hover:bg-emerald-500 group-hover:text-white transition-colors">
+              <CreditCard className="w-4 h-4" />
             </div>
           </div>
 
@@ -317,9 +330,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-100">
-            <span>Projeção anual:</span>
+            <span className="flex items-center gap-1 text-emerald-600 font-medium">
+              <span>Ver cobranças mensais</span>
+              <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
+            </span>
             <span className="font-semibold text-slate-900 font-mono">
-              {formatCurrencyBRL(projectedAnnualRevenue)}
+              {formatCurrencyBRL(projectedAnnualRevenue)}/ano
             </span>
           </div>
         </div>
