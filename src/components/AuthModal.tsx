@@ -62,10 +62,6 @@ export const AuthModal: React.FC = () => {
           <p className="text-xs text-slate-300 mt-2 leading-relaxed">
             Área de acesso restrito. É necessário estar autenticado para criar ou gerenciar contratos e imóveis.
           </p>
-          <div className="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 bg-amber-500/10 border border-amber-500/30 rounded-full text-[11px] text-amber-300">
-            <Shield className="w-3.5 h-3.5 text-amber-400" />
-            <span>Administrador Principal: Iluminatto Moraes</span>
-          </div>
         </div>
 
         {/* Tab switcher */}
@@ -134,7 +130,7 @@ export const AuthModal: React.FC = () => {
                     required
                     value={email}
                     onChange={(e) => { setEmail(e.target.value); if (error) setError(''); }}
-                    placeholder="iluminatto@gmail.com ou iluminatto"
+                    placeholder="seu.email@exemplo.com ou usuário"
                     className="w-full pl-9 pr-3 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-600 text-slate-900"
                   />
                 </div>
@@ -222,11 +218,6 @@ export const AuthModal: React.FC = () => {
                 <span>Entrar no Sistema</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
-
-              <p className="pt-3 border-t border-slate-100 text-[11px] text-slate-500 leading-tight">
-                As credenciais são verificadas no servidor. Em caso de perda da senha do Administrador Principal,
-                redefina MASTER_PASSWORD no arquivo .env e reinicie a aplicação.
-              </p>
             </form>
           ) : (
             <div className="space-y-4">
@@ -314,7 +305,7 @@ export const AuthModal: React.FC = () => {
                 </div>
 
                 <p className="text-[11px] text-slate-500 leading-tight">
-                  Após o cadastro, sua conta passará por aprovação do Administrador Iluminatto Moraes antes da liberação.
+                  Após o cadastro, sua conta passará por aprovação da administração antes da liberação.
                 </p>
 
                 <button

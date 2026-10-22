@@ -457,10 +457,15 @@ const rateLimiterMiddleware = (
 // must be embedded in Google AI Studio iframes (frame-ancestors handled via CSP by Nginx).
 // Origens extras autorizadas a chamar a API (separadas por vírgula).
 // A própria origem da aplicação é sempre aceita; nada de '*'.
-const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
+const EXTRA_ALLOWED_ORIGINS = [
+  'https://loca-doc.vercel.app',
+  'https://loca-doc.vercel.app/',
+  'loca-doc.vercel.app',
+  ...(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+];
 
 function isOriginAllowed(originStr: string | undefined, req: express.Request): boolean {
   if (!originStr) return true;
@@ -473,11 +478,17 @@ function isOriginAllowed(originStr: string | undefined, req: express.Request): b
     if (originHost === directHost || (forwardedHost && originHost === forwardedHost)) {
       return true;
     }
-    if (EXTRA_ALLOWED_ORIGINS.includes(originStr) || EXTRA_ALLOWED_ORIGINS.includes(originHost)) {
+    if (
+      EXTRA_ALLOWED_ORIGINS.includes(originStr) || 
+      EXTRA_ALLOWED_ORIGINS.includes(originHost) ||
+      EXTRA_ALLOWED_ORIGINS.includes(originUrl.origin)
+    ) {
       return true;
     }
-    // Ambientes autorizados do Google Cloud Run, AI Studio Build e testes locais
+    // Ambientes autorizados do Vercel, Google Cloud Run, AI Studio Build e testes locais
     if (
+      originHost === 'loca-doc.vercel.app' ||
+      originHost.endsWith('.vercel.app') ||
       originHost.endsWith('.run.app') ||
       originHost.endsWith('.google.com') ||
       originHost.endsWith('.googleusercontent.com') ||
@@ -549,12 +560,12 @@ app.use((req, res, next) => {
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "img-src 'self' data: blob: https://*.googleusercontent.com https://lh3.googleusercontent.com",
         "font-src 'self' data: https://fonts.gstatic.com",
-        "connect-src 'self' https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://apis.google.com https://*.firebaseio.com wss://*.firebaseio.com https://*.cloudfunctions.net https://fonts.googleapis.com https://fonts.gstatic.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
-        "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://*.google.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
+        "connect-src 'self' https://loca-doc.vercel.app https://*.vercel.app https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://apis.google.com https://*.firebaseio.com wss://*.firebaseio.com https://*.cloudfunctions.net https://fonts.googleapis.com https://fonts.gstatic.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
+        "frame-src 'self' https://loca-doc.vercel.app https://*.vercel.app https://*.firebaseapp.com https://accounts.google.com https://*.google.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",
-        "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com https://*.run.app",
+        "frame-ancestors 'self' https://loca-doc.vercel.app https://*.vercel.app https://*.google.com https://*.googleusercontent.com https://*.run.app",
       ].join('; ')
     : [
         "default-src 'self'",
@@ -562,12 +573,12 @@ app.use((req, res, next) => {
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "img-src 'self' data: blob: https://*.googleusercontent.com https://lh3.googleusercontent.com",
         "font-src 'self' data: https://fonts.gstatic.com",
-        "connect-src 'self' ws: wss: https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://apis.google.com https://*.firebaseio.com wss://*.firebaseio.com https://fonts.googleapis.com https://fonts.gstatic.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
-        "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://*.google.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
+        "connect-src 'self' ws: wss: https://loca-doc.vercel.app https://*.vercel.app https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://apis.google.com https://*.firebaseio.com wss://*.firebaseio.com https://fonts.googleapis.com https://fonts.gstatic.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
+        "frame-src 'self' https://loca-doc.vercel.app https://*.vercel.app https://*.firebaseapp.com https://accounts.google.com https://*.google.com https://www.google.com/recaptcha/ https://www.recaptcha.net",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",
-        "frame-ancestors 'self' https://*.google.com https://*.googleusercontent.com https://*.run.app",
+        "frame-ancestors 'self' https://loca-doc.vercel.app https://*.vercel.app https://*.google.com https://*.googleusercontent.com https://*.run.app",
       ].join('; ');
   res.setHeader('Content-Security-Policy', csp);
   next();
