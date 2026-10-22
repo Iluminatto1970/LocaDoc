@@ -160,6 +160,10 @@ export interface OrganizationData {
   telefone?: string;
   email?: string;
   endereco?: string;
+  chavePix?: string;
+  pixTitular?: string;
+  filiais?: Array<{ id: string; nome: string; cidadeUf: string; telefone: string }>;
+  mensalidadeStatus?: 'em_dia' | 'pendente';
   createdAt: string;
 }
 

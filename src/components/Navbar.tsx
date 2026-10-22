@@ -4,12 +4,13 @@ import {
   FileText, PlusCircle, FolderClock, ClipboardList, 
   ShieldAlert, LogOut, User, Building2, Users, Edit3, 
   Shield, CheckCircle2, Palmtree, CalendarDays, Cpu, 
-  LayoutDashboard, Settings, CreditCard, Menu, X, ChevronRight, DollarSign
+  LayoutDashboard, Settings, CreditCard, Menu, X, ChevronRight, DollarSign, FileCode
 } from 'lucide-react';
 
 export type AppTab = 
   | 'dashboard'
   | 'imoveis' 
+  | 'minutas'
   | 'temporada'
   | 'cobrancas'
   | 'gerador' 
@@ -109,6 +110,22 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Building2 className="w-3.5 h-3.5" />
               <span>{isCondomino ? 'Meu Imóvel' : 'Imóveis'}</span>
             </button>
+
+            {/* Minutas & Modelos Tab */}
+            {!isCondomino && (
+              <button
+                type="button"
+                onClick={() => navigateTo('minutas')}
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'minutas'
+                    ? 'bg-slate-900 text-white shadow-xs font-bold'
+                    : 'text-slate-700 hover:text-slate-900 hover:bg-slate-100'
+                }`}
+              >
+                <FileCode className="w-3.5 h-3.5 text-amber-500" />
+                <span>Minutas</span>
+              </button>
+            )}
 
             {/* Cobranças & Recibos Tab (NEW) */}
             <button
@@ -465,6 +482,22 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block px-2 mb-1">
                     Contratos & Minutas
                   </span>
+
+                  {!isCondomino && (
+                    <button
+                      type="button"
+                      onClick={() => navigateTo('minutas')}
+                      className={`w-full p-2.5 rounded-xl text-xs font-semibold flex items-center justify-between cursor-pointer transition-colors ${
+                        activeTab === 'minutas' ? 'bg-slate-900 text-white' : 'text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <FileCode className={`w-4 h-4 ${activeTab === 'minutas' ? 'text-amber-400' : 'text-amber-500'}`} />
+                        <span>Minutas & Modelos de Contratos</span>
+                      </div>
+                      <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+                    </button>
+                  )}
 
                   <button
                     type="button"

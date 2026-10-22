@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserAccount, UserRole } from '../types/contract';
-import { auth, googleProvider, db } from '../lib/firebase';
+import { auth, googleProvider, db, browserPopupRedirectResolver } from '../lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { doc, setDoc, getDoc, getDocs, collection, deleteDoc } from 'firebase/firestore';
 import { AUTH_TOKEN_KEY, AUTH_USER_KEY, SESSION_EXPIRED_EVENT, getAuthToken, apiFetch } from '../lib/api';
@@ -261,29 +261,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
-      // Sessão só existe com token do backend: login Google é trocado em signInWithGoogle
-      if (fbUser && !getAuthToken()) {
-        setIsLoadingAuth(false);
-        return;
-      }
 
       if (fbUser) {
+        let token = getAuthToken();
+        // Se já autenticado no Firebase mas sem token de sessão backend, auto-sincroniza
+        if (!token) {
+          try {
+            const idToken = await fbUser.getIdToken();
+            const res = await fetch('/api/auth/google', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ idToken }),
+            });
+            const data = await res.json().catch(() => null);
+            if (res.ok && data?.success && data?.token) {
+              token = data.token;
+              localStorage.setItem(AUTH_TOKEN_KEY, token);
+              const authenticated = stripPassword(sanitizeUser(data.user));
+              localStorage.setItem(AUTH_USER_KEY, JSON.stringify(authenticated));
+              setUser(authenticated);
+              setShowAuthModal(false);
+              setIsLoadingAuth(false);
+              return;
+            }
+          } catch (e) {
+            console.warn('[AUTH] Falha ao sincronizar token Google em background:', e);
+          }
+        }
+
+        if (!token) {
+          setIsLoadingAuth(false);
+          return;
+        }
+
         const fbEmail = fbUser.email?.toLowerCase() || '';
         const isMaster = fbEmail === 'iluminatto@gmail.com';
 
-        // Check if user already exists in usersList
+        // Check if user already exists in usersList or saved in localStorage
+        const saved = localStorage.getItem('locadoc_auth_user');
+        let parsedSaved: UserAccount | null = null;
+        try { if (saved) parsedSaved = JSON.parse(saved); } catch {}
+
         const existing = usersList.find((u) => u.email.toLowerCase() === fbEmail);
 
-        const currentRole: UserRole = isMaster ? 'superadmin' : existing?.role || 'cliente';
-        const currentStatus = isMaster ? 'aprovado' : existing?.status || 'aprovado';
+        const currentRole: UserRole = isMaster
+          ? 'superadmin'
+          : existing?.role || parsedSaved?.role || 'condomino';
+        const currentStatus = isMaster
+          ? 'aprovado'
+          : existing?.status || parsedSaved?.status || 'aprovado';
 
         const userObj: UserAccount = {
-          id: fbUser.uid,
-          name: isMaster ? 'Iluminatto Moraes' : fbUser.displayName || existing?.name || fbEmail.split('@')[0],
+          id: existing?.id || parsedSaved?.id || fbUser.uid,
+          name: isMaster
+            ? 'Iluminatto Moraes'
+            : fbUser.displayName || existing?.name || parsedSaved?.name || fbEmail.split('@')[0],
           email: fbEmail,
           role: currentRole,
           status: currentStatus,
-          creci: existing?.creci || (isMaster ? 'Super Administrador' : undefined),
+          creci: existing?.creci || parsedSaved?.creci || (isMaster ? 'Super Administrador' : undefined),
         };
 
         const sanitized = sanitizeUser(userObj);
@@ -330,8 +366,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // Google: o Firebase prova a identidade e o backend troca o ID token por uma sessão do LocaDoc
   const signInWithGoogle = async () => {
     try {
-      const credential = await signInWithPopup(auth, googleProvider);
-      const idToken = await credential.user.getIdToken();
+      const credential = await signInWithPopup(auth, googleProvider, browserPopupRedirectResolver);
+      const idToken = await credential.user.getIdToken(true);
 
       const res = await fetch('/api/auth/google', {
         method: 'POST',
@@ -341,8 +377,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const data = await res.json().catch(() => null as any);
 
       if (!res.ok || !data?.success || !data?.token) {
+        console.error('[Google Auth Debug] Falha na autorização backend:', {
+          status: res.status,
+          statusText: res.statusText,
+          data,
+        });
         await signOut(auth);
-        throw new Error(data?.error || 'Não foi possível autorizar sua conta Google neste sistema.');
+        throw new Error(data?.error || `Não foi possível autorizar sua conta Google neste sistema (código ${res.status}).`);
       }
 
       const authenticated = stripPassword(sanitizeUser(data.user));
@@ -350,6 +391,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(AUTH_USER_KEY, JSON.stringify(authenticated));
       setUser(authenticated);
       setShowAuthModal(false);
+
+      setUsersList((prev) =>
+        prev.some((u) => u.id === authenticated.id)
+          ? prev.map((u) => (u.id === authenticated.id ? authenticated : u))
+          : [...prev, authenticated]
+      );
+
       if (authenticated.role === 'superadmin' || authenticated.role === 'admin') {
         await refreshUsers();
       }

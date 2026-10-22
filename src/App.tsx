@@ -14,9 +14,10 @@ import { TemporadaManager, DEFAULT_TEMPORADA_IMOVEIS } from './components/Tempor
 import { UserManager } from './components/UserManager';
 import { ApiGeminiManager } from './components/ApiGeminiManager';
 import { SaasManager } from './components/SaasManager';
+import { MinutasManager } from './components/MinutasManager';
 import { CobrancasManager } from './components/CobrancasManager';
 import { DashboardOverview } from './components/DashboardOverview';
-import { ContractData, InventarioItem, ImovelData, ImovelTemporadaData, ContractOperationType } from './types/contract';
+import { ContractData, InventarioItem, ImovelData, ImovelTemporadaData, ContractOperationType, ContractTemplate } from './types/contract';
 import { getSampleContract, getEmptyContract, numeroPorExtensoReais } from './utils/defaults';
 import { getSavedTemplates, interpolateTemplate } from './utils/templates';
 import { db } from './lib/firebase';
@@ -492,6 +493,91 @@ function MainApp() {
     await persistToFirestore(shortTermContract);
   };
 
+  const handleGenerateContractWithTemplate = async (template: ContractTemplate, imovel?: ImovelData) => {
+    const base = getEmptyContract();
+    const isVenda = template.categoria === 'venda_imovel' || (imovel && imovel.finalidade === 'venda');
+    const isTemporada = template.categoria === 'temporada' || (imovel && imovel.finalidade === 'temporada');
+    const operacao: ContractOperationType = isVenda
+      ? 'venda_imovel'
+      : isTemporada
+      ? 'temporada'
+      : 'aluguel_residencial';
+
+    const valorVenda = imovel?.valorVendaSugerido || 500000;
+    const valorAluguel = imovel?.valorAluguelSugerido || 3000;
+    const sinalEntrada = Math.round(valorVenda * 0.2);
+
+    const newContract: ContractData = {
+      ...base,
+      id: `contrato-${Date.now()}`,
+      imovelId: imovel?.id,
+      operacao,
+      templateId: template.id,
+      titulo: imovel ? `${template.titulo} - ${imovel.titulo}` : template.titulo,
+      userId: user?.id || 'usr-master-iluminatto',
+      objeto: imovel ? {
+        endereco: imovel.endereco,
+        compostos: imovel.compostos + (imovel.vagaGaragem ? ` | Garagem: ${imovel.vagaGaragem}` : ''),
+      } : base.objeto,
+      valores: {
+        ...base.valores,
+        aluguel: valorAluguel,
+        aluguelExtenso: numeroPorExtensoReais(valorAluguel),
+      },
+      garantia: {
+        ...base.garantia,
+        caucaoValor: valorAluguel * 3,
+        caucaoValorExtenso: numeroPorExtensoReais(valorAluguel * 3),
+      },
+      vendaInfo: isVenda ? {
+        valorVenda,
+        valorVendaExtenso: numeroPorExtensoReais(valorVenda),
+        sinalEntrada,
+        sinalEntradaExtenso: numeroPorExtensoReais(sinalEntrada),
+        saldoFinanciamento: valorVenda - sinalEntrada,
+        saldoRestante: valorVenda - sinalEntrada,
+        condicoesPagamento: 'Sinal de 20% na assinatura e saldo financiado pelo SFH ou quitado na escritura definitiva.',
+        matriculaImovel: imovel?.matriculaCartorio || '',
+        cartorioRegistro: imovel?.cartorioNome || 'Ofício de Registro de Imóveis Competente',
+        dataPosse: 'Imissão de posse definitiva após a quitação integral do saldo do preço.',
+      } : undefined,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      status: 'rascunho',
+    };
+
+    const filledText = interpolateTemplate(template.conteudoTexto, newContract);
+    newContract.textoPersonalizado = filledText;
+    newContract.usarTextoPersonalizado = true;
+
+    setContracts((prev) => [newContract, ...prev]);
+    setActiveContractId(newContract.id);
+    setActiveTab('editor');
+    showToast(`Contrato gerado com a minuta "${template.titulo}"!`);
+    await persistToFirestore(newContract);
+  };
+
+  const handleLinkTemplateToImovel = async (templateId: string, imovelId: string) => {
+    setImoveis((prev) => {
+      const updated = prev.map((im) => {
+        if (im.id === imovelId) {
+          return { ...im, modeloContratoPadraoId: templateId };
+        }
+        return im;
+      });
+      localStorage.setItem('locadoc_imoveis_db', JSON.stringify(updated));
+      return updated;
+    });
+
+    try {
+      await setDoc(doc(db, 'imoveis', imovelId), { modeloContratoPadraoId: templateId }, { merge: true });
+    } catch (e) {
+      console.warn('Erro ao sincronizar minuta com Firestore:', e);
+    }
+
+    showToast('Minuta vinculada com sucesso a este imóvel!');
+  };
+
   // If in public view mode (e.g. opened via QR Code scan on mobile)
   if (publicViewContract) {
     return (
@@ -564,6 +650,15 @@ function MainApp() {
             imoveisList={visibleImoveis}
             onGenerateContractForImovel={handleGenerateContractForImovel}
             onViewContractRequested={() => setActiveTab('visualizador')}
+            onNavigateToMinutas={() => setActiveTab('minutas')}
+          />
+        )}
+
+        {activeTab === 'minutas' && (
+          <MinutasManager
+            imoveis={visibleImoveis}
+            onGenerateContractWithTemplate={handleGenerateContractWithTemplate}
+            onLinkTemplateToImovel={handleLinkTemplateToImovel}
           />
         )}
 

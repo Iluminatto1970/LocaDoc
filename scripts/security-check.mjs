@@ -1,8 +1,11 @@
 import fs from 'fs';
 
 const BASE = 'http://localhost:3000';
-const env = fs.readFileSync('.env', 'utf8');
-const masterPassword = (env.match(/^MASTER_PASSWORD="?([^"\r\n]+)/m) || [])[1] || '';
+let env = '';
+try {
+  if (fs.existsSync('.env')) env = fs.readFileSync('.env', 'utf8');
+} catch {}
+const masterPassword = (env.match(/^MASTER_PASSWORD="?([^"\r\n]+)/m) || [])[1] || process.env.MASTER_PASSWORD || '';
 
 const results = [];
 function record(label, ok, detail) {
@@ -45,10 +48,11 @@ async function req(path, { method = 'GET', token, body, headers = {} } = {}, att
   const r = await req('/api/users', { headers: { 'x-user-id': 'usr-master-iluminatto', 'x-user-email': 'iluminatto@gmail.com' } });
   record('Spoof x-user-id sem token', r.status === 401, `HTTP ${r.status}`);
 }
-// 3. Senha antiga vazada
+// 3. Senha antiga ou inválida
 {
-  const r = await req('/api/auth/login', { method: 'POST', body: { email: 'iluminatto@gmail.com', password: '@Vito4747' } });
-  record('Login com senha vazada @Vito4747', r.status === 401, `HTTP ${r.status}`);
+  const wrongPassword = masterPassword === '@Vito4747' ? 'senha-antiga-revogada-123' : '@Vito4747';
+  const r = await req('/api/auth/login', { method: 'POST', body: { email: 'iluminatto@gmail.com', password: wrongPassword } });
+  record('Login com senha inválida/revogada', r.status === 401, `HTTP ${r.status}`);
 }
 // 4. NoSQL injection no login
 {

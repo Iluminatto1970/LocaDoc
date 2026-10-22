@@ -8,13 +8,14 @@ import { collection, doc, setDoc, deleteDoc, getDocs, query, where } from 'fireb
 import { 
   Building2, Plus, Edit2, Trash2, Home, MapPin, DollarSign, 
   FileText, Check, X, Image as ImageIcon, Sparkles, Upload, 
-  Eye, CheckCircle2, Search, ArrowRight, AlertCircle, Layers, Handshake, Tag, Bookmark
+  Eye, CheckCircle2, Search, ArrowRight, AlertCircle, Layers, Handshake, Tag, Bookmark, FileCode
 } from 'lucide-react';
 
 interface ImoveisManagerProps {
   onGenerateContractForImovel: (imovel: ImovelData, forceOperacao?: any) => void;
   imoveisList?: ImovelData[];
   onViewContractRequested?: () => void;
+  onNavigateToMinutas?: () => void;
 }
 
 export const DEFAULT_IMOVEIS: ImovelData[] = [
@@ -74,6 +75,7 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
   onGenerateContractForImovel,
   imoveisList,
   onViewContractRequested,
+  onNavigateToMinutas,
 }) => {
   const { user } = useAuth();
   const isTenant = user?.role === 'cliente' || user?.role === 'condomino';
@@ -321,14 +323,27 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
         </div>
 
         {!isTenant && (
-          <button
-            type="button"
-            onClick={handleOpenAddModal}
-            className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2 shrink-0 cursor-pointer"
-          >
-            <Plus className="w-4 h-4 text-amber-400" />
-            <span>Cadastrar Novo Imóvel</span>
-          </button>
+          <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+            {onNavigateToMinutas && (
+              <button
+                type="button"
+                onClick={onNavigateToMinutas}
+                className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs rounded-xl border border-slate-300 transition-colors flex items-center gap-2 cursor-pointer shadow-2xs"
+                title="Acessar banco de minutas, modelos de contrato e upload de novas minutas"
+              >
+                <FileCode className="w-4 h-4 text-amber-600" />
+                <span>Central de Minutas</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleOpenAddModal}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4 text-amber-400" />
+              <span>Cadastrar Novo Imóvel</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -434,13 +449,25 @@ export const ImoveisManager: React.FC<ImoveisManagerProps> = ({
                   <h3 className="text-sm font-bold text-slate-900 mt-1.5">
                     {imovel.titulo}
                   </h3>
-                  <div className="flex items-center gap-1 text-[11px] text-slate-500 mt-0.5">
-                    <Bookmark className="w-3 h-3 text-amber-500 shrink-0" />
-                    <span className="truncate max-w-[240px]">
-                      {imovel.minutaPersonalizadaImovel
-                        ? 'Minuta Exclusiva Deste Imóvel'
-                        : templatesList.find((t) => t.id === imovel.modeloContratoPadraoId)?.titulo || 'Modelo Padrão'}
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-1 flex-wrap">
+                    <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-900 border border-amber-200 px-2 py-0.5 rounded font-medium">
+                      <Bookmark className="w-3 h-3 text-amber-600 shrink-0" />
+                      <span className="truncate max-w-[200px]">
+                        {imovel.minutaPersonalizadaImovel
+                          ? 'Minuta Exclusiva do Imóvel'
+                          : templatesList.find((t) => t.id === imovel.modeloContratoPadraoId)?.titulo || 'Modelo Padrão'}
+                      </span>
                     </span>
+                    {!isTenant && onNavigateToMinutas && (
+                      <button
+                        type="button"
+                        onClick={onNavigateToMinutas}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+                        title="Ir para Central de Minutas para criar, editar ou vincular novo modelo"
+                      >
+                        Trocar Minuta
+                      </button>
+                    )}
                   </div>
                 </div>
 
